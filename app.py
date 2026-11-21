@@ -6,16 +6,25 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 from markupsafe import escape
+from sqlalchemy import inspect, text
 
 app = Flask(__name__, static_folder='.', static_url_path='/static')
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
 
-os.makedirs(app.instance_path, exist_ok=True)
-db_path = os.path.join(app.instance_path, 'dvora.db')
-app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
+database_url = os.environ.get('DATABASE_URL', '').strip()
+if database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+
+if database_url:
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+else:
+    os.makedirs(app.instance_path, exist_ok=True)
+    db_path = os.path.join(app.instance_path, 'dvora.db')
+    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'uploads')
+app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER') or os.path.join(app.root_path, 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -110,6 +119,16 @@ BADGES_LIST = [
     {'name': 'Atlach-Nacha', 'icon': 'fa-spider'}
 ]
 
+BADGE_SHOP_ITEMS = [
+    {'name': 'VIP', 'icon': 'fa-star', 'cost': 250, 'desc': 'Stand out with a VIP star badge on your profile.'},
+    {'name': 'Gamer', 'icon': 'fa-gamepad', 'cost': 150, 'desc': 'Show off your gaming status.'},
+    {'name': 'Music', 'icon': 'fa-music', 'cost': 150, 'desc': 'For music lovers and producers.'},
+    {'name': 'Artist', 'icon': 'fa-palette', 'cost': 200, 'desc': 'Showcase your creative flair.'},
+    {'name': 'Booster', 'icon': 'fa-rocket', 'cost': 350, 'desc': 'Rocket badge for top supporters.'},
+    {'name': 'Elite', 'icon': 'fa-medal', 'cost': 500, 'desc': 'Reserved for dedicated Dvora members.'},
+    {'name': 'Legend', 'icon': 'fa-dragon', 'cost': 1000, 'desc': 'Mythic dragon badge for true legends.'},
+]
+
 
 # --- DATABASE MODELS ---
 class User(UserMixin, db.Model):
@@ -117,6 +136,8 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(32), unique=True, nullable=False, index=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
+    credits = db.Column(db.Integer, default=100)
+    last_daily_claim = db.Column(db.Date, nullable=True)
     is_banned = db.Column(db.Boolean, default=False)
     ban_reason = db.Column(db.String(256), default='')
     created = db.Column(db.DateTime, default=datetime.utcnow)
@@ -126,6 +147,7 @@ class User(UserMixin, db.Model):
     badges = db.relationship('Badge', backref='user', cascade='all, delete-orphan')
     warnings = db.relationship('Warning', backref='user', cascade='all, delete-orphan', order_by='Warning.created.desc()')
     messages_received = db.relationship('DirectMessage', foreign_keys='DirectMessage.recipient_id', backref='recipient', cascade='all, delete-orphan', order_by='DirectMessage.created.desc()')
+    credit_logs = db.relationship('CreditLog', backref='user', cascade='all, delete-orphan', order_by='CreditLog.created.desc()')
 
     @property
     def is_admin(self):
@@ -209,11 +231,110 @@ class Announcement(db.Model):
     created = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class SiteSetting(db.Model):
+    key = db.Column(db.String(64), primary_key=True)
+    value = db.Column(db.Text, default='')
+
+
+class CreditLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    delta = db.Column(db.Integer, nullable=False)
+    reason = db.Column(db.String(256), nullable=False)
+    created = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class AuditLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    actor = db.Column(db.String(32), nullable=False)
+    action = db.Column(db.String(64), nullable=False)
+    target = db.Column(db.String(64), default='')
+    details = db.Column(db.String(512), default='')
+    created = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+def get_setting(key, default=''):
+    row = db.session.get(SiteSetting, key)
+    return row.value if row and row.value is not None else default
+
+
+def set_setting(key, value):
+    row = db.session.get(SiteSetting, key)
+    if not row:
+        row = SiteSetting(key=key, value=str(value))
+        db.session.add(row)
+    else:
+        row.value = str(value)
+
+
+def log_audit(actor, action, target='', details=''):
+    db.session.add(AuditLog(actor=actor, action=action, target=target, details=details[:512]))
+
+
+def adjust_credits(user, delta, reason):
+    user.credits = max(0, (user.credits or 0) + int(delta))
+    db.session.add(CreditLog(user_id=user.id, delta=int(delta), reason=reason[:256]))
+
+
+def run_auto_migrations():
+    db.create_all()
+    insp = inspect(db.engine)
+    if 'user' in insp.get_table_names():
+        user_cols = {c['name'] for c in insp.get_columns('user')}
+        with db.engine.begin() as conn:
+            if 'credits' not in user_cols:
+                conn.execute(text('ALTER TABLE "user" ADD COLUMN credits INTEGER DEFAULT 100'))
+            if 'last_daily_claim' not in user_cols:
+                conn.execute(text('ALTER TABLE "user" ADD COLUMN last_daily_claim DATE'))
+            if 'is_banned' not in user_cols:
+                conn.execute(text('ALTER TABLE "user" ADD COLUMN is_banned BOOLEAN DEFAULT 0'))
+            if 'ban_reason' not in user_cols:
+                conn.execute(text("ALTER TABLE \"user\" ADD COLUMN ban_reason VARCHAR(256) DEFAULT ''"))
+    if 'profile' in insp.get_table_names():
+        prof_cols = {c['name'] for c in insp.get_columns('profile')}
+        with db.engine.begin() as conn:
+            if 'audio_file' not in prof_cols:
+                conn.execute(text("ALTER TABLE profile ADD COLUMN audio_file VARCHAR(128) DEFAULT ''"))
+            if 'audio_title' not in prof_cols:
+                conn.execute(text("ALTER TABLE profile ADD COLUMN audio_title VARCHAR(128) DEFAULT ''"))
+
+    defaults = {
+        'site_name': 'Dvora.lol',
+        'maintenance_mode': '0',
+        'registrations_open': '1',
+        'signup_bonus_credits': '100',
+        'daily_claim_credits': '50',
+        'social_discord': 'https://discord.gg/dvora',
+        'social_twitter': 'https://x.com/dvoralol',
+        'social_youtube': '',
+        'social_tiktok': '',
+        'social_github': '',
+        'social_instagram': '',
+        'credits_text': 'Built by the Dvora.lol team • Powered by Python & Flask',
+        'credits_team': 'dvora — Founder & Lead Developer',
+        'credits_supporters': 'Special thanks to our early supporters, beta testers, and community boosters.',
+    }
+    changed = False
+    for k, v in defaults.items():
+        if not db.session.get(SiteSetting, k):
+            db.session.add(SiteSetting(key=k, value=v))
+            changed = True
+    if changed:
+        db.session.commit()
+
+
+with app.app_context():
+    run_auto_migrations()
+
+
 @login_manager.user_loader
 def load_user(uid):
     user = db.session.get(User, int(uid))
-    if user and not user.profile:
-        user.profile = Profile(display_name=user.username, page_title=f'{user.username} | Dvora.lol')
+    if user:
+        if user.credits is None:
+            user.credits = 100
+        if not user.profile:
+            user.profile = Profile(display_name=user.username, page_title=f'{user.username} | {get_setting("site_name", "Dvora.lol")}')
         db.session.commit()
     return user
 
@@ -241,23 +362,42 @@ def delete_upload(fname):
             os.remove(path)
 
 
-with app.app_context():
-    db.create_all()
+@app.before_request
+def check_maintenance_and_ban():
+    if request.path.startswith('/static') or request.path.startswith('/uploads'):
+        return
+    if current_user.is_authenticated and current_user.is_banned and not session.get('impersonator_id'):
+        logout_user()
+        flash('Your account has been suspended.')
+        return redirect('/login')
+    if get_setting('maintenance_mode', '0') == '1':
+        allowed_paths = {'/login', '/logout', '/admin/stop-impersonate'}
+        if request.path not in allowed_paths and not request.path.startswith('/admin'):
+            if not (current_user.is_authenticated and current_user.is_admin):
+                return page("""<div class="card" style="max-width:520px;margin:5rem auto;text-align:center;">
+                    <i class="fa-solid fa-screwdriver-wrench" style="font-size:2.5rem;color:#f59e0b;margin-bottom:1rem;"></i>
+                    <h2>Under Maintenance</h2>
+                    <p style="color:#a1a1aa;margin-top:0.5rem;">We're upgrading Dvora.lol right now. Please check back shortly!</p>
+                </div>""", 'Maintenance')
+
 
 # --- BASE HTML WITH PARTICLES ---
 BASE = """
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ title or 'Dvora.lol' }}</title>
+<title>{{ title or site_name }}</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <canvas id="particles" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:-1;pointer-events:none;"></canvas>
-<nav><a href="/" class="brand">Dvora<span>.lol</span></a><div>
+<nav><a href="/" class="brand">{{ site_brand }}<span>{{ site_tld }}</span></a><div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;">
 {% if session.get('impersonator_id') %}
 <a href="/admin/stop-impersonate" style="color: #fbbf24; font-weight: bold;"><i class="fa-solid fa-user-secret"></i> Exit Impersonation</a>
 {% endif %}
+<a href="/socials"><i class="fa-solid fa-share-nodes"></i> Socials</a>
+<a href="/credits"><i class="fa-solid fa-award"></i> Credits</a>
 {% if current_user.is_authenticated %}
+<a href="/dashboard/credits" style="color:#fbbf24;font-weight:600;"><i class="fa-solid fa-coins"></i> {{ current_user.credits or 0 }}</a>
 {% if current_user.is_admin %}<a href="/admin" style="color: #ff4b4b; font-weight: bold;"><i class="fa-solid fa-shield-halved"></i> Admin</a>{% endif %}
 <a href="/dashboard"><i class="fa-solid fa-gauge"></i> Dashboard</a><a href="/logout"><i class="fa-solid fa-arrow-right-from-bracket"></i> Logout</a>
 {% else %}<a href="/login">Login</a><a href="/register">Register</a>{% endif %}
@@ -301,27 +441,110 @@ BASE = """
 """
 
 
-def page(body, title='Dvora.lol'):
+def page(body, title=None):
+    site_name = get_setting('site_name', 'Dvora.lol')
+    if '.' in site_name:
+        brand_part, tld_part = site_name.split('.', 1)
+        tld_part = '.' + tld_part
+    else:
+        brand_part, tld_part = site_name, ''
     active_anns = Announcement.query.filter_by(active=True).order_by(Announcement.created.desc()).limit(3).all()
-    return render_template_string(BASE, body=body, title=title, announcements=active_anns)
+    return render_template_string(
+        BASE,
+        body=body,
+        title=title or site_name,
+        site_name=site_name,
+        site_brand=brand_part,
+        site_tld=tld_part,
+        announcements=active_anns,
+    )
 
 
 @app.route('/')
 def index():
-    return page("""<section class="hero">
+    total_users = User.query.count()
+    total_views = db.session.query(db.func.coalesce(db.func.sum(Profile.views), 0)).scalar() or 0
+    return page(f"""<section class="hero">
     <h1>Your identity, one link.</h1>
-    <p>Build a premium, fully customizable creator profile at Dvora.lol/yourname.</p>
-    <a class="btn" href="/register"><i class="fa-solid fa-rocket"></i> Claim your link</a></section>""")
+    <p>Build a premium, fully customizable creator profile at {escape(get_setting('site_name', 'Dvora.lol'))}/yourname.</p>
+    <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+      <a class="btn" href="/register"><i class="fa-solid fa-rocket"></i> Claim your link</a>
+      <a class="mini" href="/socials" style="padding:0.8rem 1.3rem;font-size:0.95rem;"><i class="fa-solid fa-share-nodes"></i> Official Socials</a>
+      <a class="mini" href="/credits" style="padding:0.8rem 1.3rem;font-size:0.95rem;"><i class="fa-solid fa-award"></i> Credits</a>
+    </div>
+    <p style="margin-top:2rem;font-size:0.85rem;opacity:0.7;">{total_users} Creators • {total_views} Profile Views</p>
+    </section>""")
+
+
+@app.route('/socials')
+def public_socials():
+    items = [
+        ('Discord', 'fa-brands fa-discord', '#5865F2', get_setting('social_discord', '')),
+        ('X / Twitter', 'fa-brands fa-x-twitter', '#ffffff', get_setting('social_twitter', '')),
+        ('YouTube', 'fa-brands fa-youtube', '#ef4444', get_setting('social_youtube', '')),
+        ('TikTok', 'fa-brands fa-tiktok', '#ec4899', get_setting('social_tiktok', '')),
+        ('GitHub', 'fa-brands fa-github', '#e4e4e7', get_setting('social_github', '')),
+        ('Instagram', 'fa-brands fa-instagram', '#f59e0b', get_setting('social_instagram', '')),
+    ]
+    cards = ''.join(
+        f"""<a href="{escape(url)}" target="_blank" rel="noopener" class="link" style="margin:0;">
+            <span style="display:flex;align-items:center;gap:12px;">
+                <i class="{icon}" style="color:{color};font-size:1.3rem;width:24px;"></i>
+                <span>{name}</span>
+            </span>
+            <i class="fa-solid fa-arrow-up-right-from-square link-arrow"></i>
+        </a>"""
+        for name, icon, color, url in items if url.strip()
+    ) or '<p style="color:#a1a1aa;">No official socials have been configured yet.</p>'
+
+    return page(f"""<div class="card" style="max-width:650px;margin:2rem auto;">
+        <h2><i class="fa-solid fa-share-nodes" style="color:#8b5cf6;"></i> Official Socials</h2>
+        <p style="color:#a1a1aa;margin:0.5rem 0 1.5rem 0;">Connect with the official {escape(get_setting('site_name', 'Dvora.lol'))} community and updates.</p>
+        <div style="display:flex;flex-direction:column;gap:0.8rem;">{cards}</div>
+    </div>""", 'Socials')
+
+
+@app.route('/credits')
+def public_credits():
+    team_lines = [line.strip() for line in get_setting('credits_team', '').splitlines() if line.strip()]
+    team_html = ''.join(
+        f'<div class="row"><span><i class="fa-solid fa-code" style="color:#8b5cf6;margin-right:8px;"></i>{escape(line)}</span></div>'
+        for line in team_lines
+    ) or '<p style="color:#a1a1aa;">No team entries listed.</p>'
+
+    staff_users = [u for u in User.query.all() if u.is_admin]
+    staff_pills = ''.join(
+        f'<a href="/{u.username}" class="mini" style="text-decoration:none;"><i class="fa-solid fa-shield-halved" style="color:#8b5cf6;margin-right:6px;"></i>@{escape(u.username)}</a>'
+        for u in staff_users
+    )
+
+    return page(f"""<div class="card" style="max-width:720px;margin:2rem auto;">
+        <h2><i class="fa-solid fa-award" style="color:#8b5cf6;"></i> Credits & Contributors</h2>
+        <p style="color:#a1a1aa;margin:0.6rem 0 1.4rem 0;">{escape(get_setting('credits_text', ''))}</p>
+        <h3 style="margin-bottom:0.5rem;">Core Team</h3>
+        <div style="margin-bottom:1.5rem;">{team_html}</div>
+        <h3 style="margin-bottom:0.6rem;">Active Staff</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1.5rem;">{staff_pills or '<span style="color:#a1a1aa;">None</span>'}</div>
+        <h3 style="margin-bottom:0.5rem;">Community & Supporters</h3>
+        <p style="color:#d4d4d8;line-height:1.6;">{escape(get_setting('credits_supporters', ''))}</p>
+    </div>""", 'Credits')
 
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
+    if get_setting('registrations_open', '1') != '1':
+        return page("""<div class="card auth-card" style="text-align:center;">
+            <h2>Registrations Closed</h2>
+            <p style="color:#a1a1aa;margin-top:0.6rem;">New account signups are currently paused by staff.</p>
+        </div>""", 'Register')
+
     if request.method == 'POST':
         u = request.form['username'].strip().lower()
         e = request.form['email'].strip().lower()
         p = request.form['password']
 
-        if u in ['admin', 'root', 'system', 'dashboard', 'login', 'register', 'logout', 'uploads', 'static', 'go']:
+        reserved = {'admin', 'root', 'system', 'dashboard', 'login', 'register', 'logout', 'uploads', 'static', 'go', 'socials', 'credits'}
+        if u in reserved:
             flash('This username is reserved.')
             return redirect('/register')
 
@@ -335,9 +558,13 @@ def register():
             flash('Email already registered')
             return redirect('/register')
 
-        user = User(username=u, email=e, password_hash=generate_password_hash(p))
-        user.profile = Profile(display_name=u, page_title=f'{u} | Dvora.lol')
+        bonus = int(get_setting('signup_bonus_credits', '100') or 100)
+        user = User(username=u, email=e, password_hash=generate_password_hash(p), credits=bonus)
+        user.profile = Profile(display_name=u, page_title=f'{u} | {get_setting("site_name", "Dvora.lol")}')
         db.session.add(user)
+        db.session.flush()
+        if bonus > 0:
+            db.session.add(CreditLog(user_id=user.id, delta=bonus, reason='Welcome signup bonus'))
         db.session.commit()
         login_user(user)
         return redirect('/dashboard')
@@ -389,10 +616,16 @@ def stop_impersonate():
 
 def dash(body, active):
     nav = ''.join(f'<a class="{"active" if k==active else ""}" href="/dashboard{s}"><i class="fa-solid {i}"></i> {n}</a>'
-                  for k, s, n, i in [('overview', '', 'Overview', 'fa-chart-pie'), ('profile', '/profile', 'Profile', 'fa-user'),
-                  ('links', '/links', 'Links', 'fa-link'), ('badges', '/badges', 'Badges', 'fa-medal'),
-                  ('appearance', '/appearance', 'Appearance', 'fa-palette'), ('analytics', '/analytics', 'Analytics', 'fa-chart-line'),
-                  ('settings', '/settings', 'Settings', 'fa-gear')])
+                  for k, s, n, i in [
+                      ('overview', '', 'Overview', 'fa-chart-pie'),
+                      ('profile', '/profile', 'Profile', 'fa-user'),
+                      ('links', '/links', 'Links', 'fa-link'),
+                      ('badges', '/badges', 'Badges', 'fa-medal'),
+                      ('credits', '/credits', 'Credits & Shop', 'fa-coins'),
+                      ('appearance', '/appearance', 'Appearance', 'fa-palette'),
+                      ('analytics', '/analytics', 'Analytics', 'fa-chart-line'),
+                      ('settings', '/settings', 'Settings', 'fa-gear'),
+                  ])
     return page(f'<div class="dash"><aside>{nav}<hr style="border-color:rgba(255,255,255,0.05);margin:1rem 0;"><a href="/{current_user.username}" target="_blank"><i class="fa-solid fa-eye"></i> View public</a></aside><section class="dash-body">{body}</section></div>')
 
 
@@ -413,10 +646,129 @@ def dashboard():
     return dash(f"""<h2>Welcome, {escape(p.display_name)}</h2>
 <div class="stats"><div class="stat"><i class="fa-solid fa-eye" style="color:#3b82f6;"></i><span>{p.views}</span>Profile views</div>
 <div class="stat"><i class="fa-solid fa-link" style="color:#8b5cf6;"></i><span>{len(current_user.links)}</span>Links</div>
-<div class="stat"><i class="fa-solid fa-arrow-pointer" style="color:#10b981;"></i><span>{sum(l.clicks for l in current_user.links)}</span>Total clicks</div></div>
+<div class="stat"><i class="fa-solid fa-arrow-pointer" style="color:#10b981;"></i><span>{sum(l.clicks for l in current_user.links)}</span>Total clicks</div>
+<div class="stat"><i class="fa-solid fa-coins" style="color:#fbbf24;"></i><span>{current_user.credits or 0}</span>Credits</div></div>
 <div class="card"><p>Your public page is live at: <a href="/{current_user.username}" target="_blank" style="color:#8b5cf6;font-weight:bold;">/{current_user.username}</a></p></div>
 {warn_html}
 {msg_html}""", 'overview')
+
+
+@app.route('/dashboard/credits', methods=['GET', 'POST'])
+@login_required
+def user_credits():
+    daily_amount = int(get_setting('daily_claim_credits', '50') or 50)
+    today = date.today()
+    can_claim = current_user.last_daily_claim != today
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'claim_daily':
+            if current_user.last_daily_claim == today:
+                flash('You already claimed your daily credits today!')
+            else:
+                current_user.last_daily_claim = today
+                adjust_credits(current_user, daily_amount, 'Daily check-in reward')
+                db.session.commit()
+                flash(f'Claimed +{daily_amount} credits!')
+            return redirect('/dashboard/credits')
+
+        elif action == 'buy_badge':
+            badge_name = request.form.get('badge_name', '')
+            item = next((i for i in BADGE_SHOP_ITEMS if i['name'] == badge_name), None)
+            if not item:
+                flash('Invalid shop item.')
+            elif Badge.query.filter_by(user_id=current_user.id, name=item['name']).first():
+                flash('You already own this badge!')
+            elif (current_user.credits or 0) < item['cost']:
+                flash('Not enough credits!')
+            else:
+                adjust_credits(current_user, -item['cost'], f"Purchased {item['name']} badge")
+                db.session.add(Badge(user_id=current_user.id, name=item['name'], icon=item['icon'], visible=True))
+                db.session.commit()
+                flash(f"Unlocked {item['name']} badge!")
+            return redirect('/dashboard/credits')
+
+        elif action == 'transfer':
+            to_name = request.form.get('recipient', '').strip().lower()
+            try:
+                amount = int(request.form.get('amount', 0))
+            except ValueError:
+                amount = 0
+            target = User.query.filter_by(username=to_name).first()
+            if not target or target.id == current_user.id:
+                flash('Enter a valid recipient username.')
+            elif amount < 1:
+                flash('Amount must be at least 1 credit.')
+            elif (current_user.credits or 0) < amount:
+                flash('Insufficient credits.')
+            else:
+                adjust_credits(current_user, -amount, f'Sent credits to @{target.username}')
+                adjust_credits(target, amount, f'Received credits from @{current_user.username}')
+                db.session.commit()
+                flash(f'Sent {amount} credits to @{target.username}!')
+            return redirect('/dashboard/credits')
+
+    owned = {b.name for b in current_user.badges}
+    shop_rows = ''
+    for item in BADGE_SHOP_ITEMS:
+        is_owned = item['name'] in owned
+        btn = '<span style="color:#10b981;font-weight:600;">Owned</span>' if is_owned else f"""
+            <form method="post">
+                <input type="hidden" name="action" value="buy_badge">
+                <input type="hidden" name="badge_name" value="{item['name']}">
+                <button class="btn" style="padding:0.45rem 0.9rem;"><i class="fa-solid fa-coins"></i> {item['cost']}</button>
+            </form>"""
+        shop_rows += f"""<div class="row" style="padding:0.9rem 0;">
+            <div>
+                <div style="font-weight:700;"><i class="fa-solid {item['icon']}" style="color:#8b5cf6;margin-right:8px;"></i>{item['name']}</div>
+                <div style="font-size:0.82rem;color:#a1a1aa;margin-top:2px;">{item['desc']}</div>
+            </div>
+            {btn}
+        </div>"""
+
+    logs_html = ''.join(
+        f"""<div class="row">
+            <span>{escape(lg.reason)}</span>
+            <span style="font-weight:700;color:{'#10b981' if lg.delta >= 0 else '#ef4444'};">{'+' if lg.delta >= 0 else ''}{lg.delta}</span>
+        </div>"""
+        for lg in current_user.credit_logs[:15]
+    ) or '<p style="color:#a1a1aa;">No credit transactions yet.</p>'
+
+    claim_btn = (
+        f'<form method="post"><input type="hidden" name="action" value="claim_daily"><button class="btn"><i class="fa-solid fa-gift"></i> Claim Daily +{daily_amount} Credits</button></form>'
+        if can_claim
+        else '<span style="color:#10b981;font-weight:600;"><i class="fa-solid fa-check"></i> Daily reward claimed today</span>'
+    )
+
+    return dash(f"""<h2>Credits & Badge Shop</h2>
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;">
+        <div>
+            <div style="color:#a1a1aa;font-size:0.85rem;">Current Balance</div>
+            <div style="font-size:2rem;font-weight:800;color:#fbbf24;"><i class="fa-solid fa-coins"></i> {current_user.credits or 0}</div>
+        </div>
+        {claim_btn}
+    </div>
+
+    <div class="card">
+        <h3>Badge Shop</h3>
+        <p style="color:#a1a1aa;font-size:0.88rem;margin:0.3rem 0 0.8rem 0;">Spend your credits to unlock profile badges.</p>
+        {shop_rows}
+    </div>
+
+    <form method="post" class="card">
+        <h3>Send Credits to Another User</h3>
+        <input type="hidden" name="action" value="transfer">
+        <div class="grid-2">
+            <input name="recipient" placeholder="Recipient username" required>
+            <input type="number" name="amount" min="1" placeholder="Amount" required>
+        </div>
+        <button class="btn" style="margin-top:0.5rem;"><i class="fa-solid fa-paper-plane"></i> Send Credits</button>
+    </form>
+
+    <div class="card">
+        <h3>Recent Credit History</h3>
+        {logs_html}
+    </div>""", 'credits')
 
 
 @app.route('/dashboard/profile', methods=['GET', 'POST'])
@@ -579,9 +931,9 @@ def manage_badges():
                         <span style="color: #10b981; font-size: 0.9rem;">Unlocked</span>
                     </div>"""
         else:
-            rows = "<p>You don't have any badges yet.</p>"
+            rows = "<p>You don't have any badges yet. Earn credits or buy them in the Credits & Shop tab!</p>"
         title = "Your Badges"
-        subtitle = "These are the badges you have earned. Only staff can grant new ones."
+        subtitle = "These are the badges you have earned or unlocked in the Credits Shop."
 
     return dash(f"""<div class="card"><h2>{title}</h2><p style="color:#a1a1aa; margin-bottom:1rem;">{subtitle}</p>{rows}</div>""", 'badges')
 
@@ -664,47 +1016,144 @@ def track_link(link_id):
     return redirect(link.url)
 
 
+# --- MASSIVE STAFF ADMIN PANEL WITH TABS ---
 @app.route('/admin', methods=['GET', 'POST'])
 @login_required
 def admin():
     if not current_user.is_admin:
         abort(403)
 
+    tab = request.values.get('tab', 'overview')
+    q_val = request.values.get('q', '').strip()
+
     if request.method == 'POST':
         action = request.form.get('action')
-        q_val = request.form.get('q', '')
 
+        # --- ANNOUNCEMENTS TAB ACTIONS ---
         if action == 'create_announcement':
             title = request.form.get('ann_title', '').strip()[:128]
             body = request.form.get('ann_body', '').strip()
             if title and body:
                 db.session.add(Announcement(title=title, body=body, author=current_user.username, active=True))
+                log_audit(current_user.username, 'CREATE_ANNOUNCEMENT', title, body)
                 db.session.commit()
                 flash('Global announcement published.')
             else:
                 flash('Announcement title and message are required.')
-            return redirect(url_for('admin', q=q_val))
+            return redirect(url_for('admin', tab='announcements'))
 
         if action == 'toggle_announcement':
             ann = db.session.get(Announcement, int(request.form.get('ann_id', 0)))
             if ann:
                 ann.active = not ann.active
+                log_audit(current_user.username, 'TOGGLE_ANNOUNCEMENT', ann.title, f'active={ann.active}')
                 db.session.commit()
                 flash('Announcement status updated.')
-            return redirect(url_for('admin', q=q_val))
+            return redirect(url_for('admin', tab='announcements'))
 
         if action == 'delete_announcement':
             ann = db.session.get(Announcement, int(request.form.get('ann_id', 0)))
             if ann:
+                log_audit(current_user.username, 'DELETE_ANNOUNCEMENT', ann.title)
                 db.session.delete(ann)
                 db.session.commit()
                 flash('Announcement deleted.')
-            return redirect(url_for('admin', q=q_val))
+            return redirect(url_for('admin', tab='announcements'))
 
+        # --- SOCIALS TAB ACTIONS ---
+        if action == 'save_socials':
+            for k in ['social_discord', 'social_twitter', 'social_youtube', 'social_tiktok', 'social_github', 'social_instagram']:
+                set_setting(k, request.form.get(k, '').strip()[:512])
+            log_audit(current_user.username, 'UPDATE_SOCIALS', 'site_settings')
+            db.session.commit()
+            flash('Official site socials updated!')
+            return redirect(url_for('admin', tab='socials'))
+
+        # --- CREDITS TAB ACTIONS ---
+        if action == 'save_credits_page':
+            set_setting('credits_text', request.form.get('credits_text', '').strip())
+            set_setting('credits_team', request.form.get('credits_team', '').strip())
+            set_setting('credits_supporters', request.form.get('credits_supporters', '').strip())
+            set_setting('signup_bonus_credits', str(max(0, int(request.form.get('signup_bonus_credits', 100) or 0))))
+            set_setting('daily_claim_credits', str(max(0, int(request.form.get('daily_claim_credits', 50) or 0))))
+            log_audit(current_user.username, 'UPDATE_CREDITS_CONFIG', 'site_settings')
+            db.session.commit()
+            flash('Credits page & economy settings saved!')
+            return redirect(url_for('admin', tab='credits'))
+
+        if action == 'grant_credits':
+            target_user = User.query.filter_by(username=request.form.get('username', '').strip().lower()).first()
+            if not target_user:
+                flash('Target user not found.')
+            else:
+                try:
+                    amount = int(request.form.get('credit_amount', 0))
+                except ValueError:
+                    amount = 0
+                reason = request.form.get('credit_reason', '').strip() or f'Staff adjustment by @{current_user.username}'
+                adjust_credits(target_user, amount, reason)
+                log_audit(current_user.username, 'ADJUST_CREDITS', f'@{target_user.username}', f'{amount:+d} ({reason})')
+                db.session.commit()
+                flash(f'Adjusted credits by {amount:+d} for @{target_user.username}.')
+            return redirect(url_for('admin', tab='credits'))
+
+        if action == 'grant_all_credits':
+            try:
+                amount = int(request.form.get('mass_amount', 0))
+            except ValueError:
+                amount = 0
+            reason = request.form.get('mass_reason', '').strip() or f'Global credit drop by @{current_user.username}'
+            if amount != 0:
+                all_u = User.query.all()
+                for u in all_u:
+                    adjust_credits(u, amount, reason)
+                log_audit(current_user.username, 'MASS_CREDITS', f'{len(all_u)} users', f'{amount:+d} ({reason})')
+                db.session.commit()
+                flash(f'Sent {amount:+d} credits to all {len(all_u)} users!')
+            return redirect(url_for('admin', tab='credits'))
+
+        # --- LINKS MODERATION TAB ACTIONS ---
+        if action == 'admin_delete_link':
+            lnk = db.session.get(Link, int(request.form.get('link_id', 0)))
+            if lnk:
+                owner = lnk.user.username if lnk.user else 'unknown'
+                log_audit(current_user.username, 'DELETE_USER_LINK', f'@{owner}', lnk.url)
+                db.session.delete(lnk)
+                db.session.commit()
+                flash('Link deleted.')
+            return redirect(url_for('admin', tab='links', q=q_val))
+
+        if action == 'admin_toggle_link':
+            lnk = db.session.get(Link, int(request.form.get('link_id', 0)))
+            if lnk:
+                lnk.visible = not lnk.visible
+                log_audit(current_user.username, 'TOGGLE_USER_LINK', f'link#{lnk.id}', f'visible={lnk.visible}')
+                db.session.commit()
+                flash('Link visibility updated.')
+            return redirect(url_for('admin', tab='links', q=q_val))
+
+        # --- SYSTEM SETTINGS TAB ACTIONS ---
+        if action == 'save_system':
+            set_setting('site_name', request.form.get('site_name', 'Dvora.lol').strip()[:64] or 'Dvora.lol')
+            set_setting('maintenance_mode', '1' if 'maintenance_mode' in request.form else '0')
+            set_setting('registrations_open', '1' if 'registrations_open' in request.form else '0')
+            log_audit(current_user.username, 'UPDATE_SYSTEM', 'site_settings')
+            db.session.commit()
+            flash('System settings updated!')
+            return redirect(url_for('admin', tab='system'))
+
+        if action == 'clear_audit_logs':
+            AuditLog.query.delete()
+            log_audit(current_user.username, 'CLEAR_AUDIT_LOGS')
+            db.session.commit()
+            flash('Audit log cleared.')
+            return redirect(url_for('admin', tab='logs'))
+
+        # --- USER MANAGEMENT TAB ACTIONS ---
         target_user = User.query.filter_by(username=request.form.get('username', '').strip().lower()).first()
         if not target_user:
             flash('Target user not found.')
-            return redirect(url_for('admin', q=q_val))
+            return redirect(url_for('admin', tab='users', q=q_val))
 
         if action in ['give', 'remove']:
             badge_name = request.form.get('badge_name')
@@ -714,8 +1163,10 @@ def admin():
                     existing = Badge.query.filter_by(user_id=target_user.id, name=badge_name).first()
                     if not existing:
                         db.session.add(Badge(user_id=target_user.id, name=badge_name, icon=badge_info['icon'], visible=True))
+                        log_audit(current_user.username, 'GIVE_BADGE', f'@{target_user.username}', badge_name)
                 elif action == 'remove':
                     Badge.query.filter_by(user_id=target_user.id, name=badge_name).delete()
+                    log_audit(current_user.username, 'REMOVE_BADGE', f'@{target_user.username}', badge_name)
                 db.session.commit()
                 flash(f'Updated badges for @{target_user.username}')
 
@@ -724,6 +1175,7 @@ def admin():
             if not target_user.profile:
                 target_user.profile = Profile(user_id=target_user.id, display_name=target_user.username)
             target_user.profile.views = max(0, target_user.profile.views + amount)
+            log_audit(current_user.username, 'ADJUST_VIEWS', f'@{target_user.username}', f'{amount:+d}')
             db.session.commit()
             flash(f'Adjusted views by {amount} for @{target_user.username}')
 
@@ -733,12 +1185,14 @@ def admin():
             else:
                 target_user.is_banned = True
                 target_user.ban_reason = request.form.get('ban_reason', '').strip()[:256] or 'Banned by staff'
+                log_audit(current_user.username, 'BAN_USER', f'@{target_user.username}', target_user.ban_reason)
                 db.session.commit()
                 flash(f'Banned @{target_user.username}')
 
         elif action == 'unban':
             target_user.is_banned = False
             target_user.ban_reason = ''
+            log_audit(current_user.username, 'UNBAN_USER', f'@{target_user.username}')
             db.session.commit()
             flash(f'Unbanned @{target_user.username}')
 
@@ -746,6 +1200,7 @@ def admin():
             reason = request.form.get('warn_reason', '').strip()[:512]
             if reason:
                 db.session.add(Warning(user_id=target_user.id, issued_by=current_user.username, reason=reason))
+                log_audit(current_user.username, 'WARN_USER', f'@{target_user.username}', reason)
                 db.session.commit()
                 flash(f'Warned @{target_user.username}')
             else:
@@ -755,120 +1210,350 @@ def admin():
             msg_body = request.form.get('dm_body', '').strip()
             if msg_body:
                 db.session.add(DirectMessage(sender_id=current_user.id, recipient_id=target_user.id, body=msg_body))
+                log_audit(current_user.username, 'DM_USER', f'@{target_user.username}', msg_body[:120])
                 db.session.commit()
                 flash(f'Message sent to @{target_user.username}')
             else:
                 flash('Message cannot be empty.')
+
+        elif action == 'reset_password':
+            new_pw = request.form.get('new_pw', '').strip()
+            if len(new_pw) >= 6:
+                target_user.password_hash = generate_password_hash(new_pw)
+                log_audit(current_user.username, 'RESET_PASSWORD', f'@{target_user.username}')
+                db.session.commit()
+                flash(f'Password reset for @{target_user.username}')
+            else:
+                flash('New password must be 6+ characters.')
+
+        elif action == 'delete_user':
+            if target_user.id == current_user.id:
+                flash('You cannot delete your own account.')
+            else:
+                uname = target_user.username
+                if target_user.profile:
+                    delete_upload(target_user.profile.avatar)
+                    delete_upload(target_user.profile.banner)
+                    delete_upload(target_user.profile.background)
+                    delete_upload(target_user.profile.audio_file)
+                db.session.delete(target_user)
+                log_audit(current_user.username, 'DELETE_USER', f'@{uname}')
+                db.session.commit()
+                flash(f'Deleted user @{uname} and all their files.')
 
         elif action == 'impersonate':
             if target_user.id == current_user.id:
                 flash('Already logged in as this user.')
             else:
                 session['impersonator_id'] = current_user.id
+                log_audit(current_user.username, 'IMPERSONATE_USER', f'@{target_user.username}')
+                db.session.commit()
                 login_user(target_user)
                 flash(f'Now logged in as @{target_user.username}')
                 return redirect('/dashboard')
 
-        return redirect(url_for('admin', q=q_val))
+        return redirect(url_for('admin', tab='users', q=q_val))
 
-    query = request.args.get('q', '').strip().lower()
-    users = User.query.filter(User.username.ilike(f'%{query}%')).all() if query else User.query.order_by(User.created.desc()).all()
-    badge_options_html = ''.join(f'<option value="{b["name"]}">{b["name"]}</option>' for b in BADGES_LIST)
+    # --- ADMIN SIDEBAR NAVIGATION ---
+    admin_tabs = [
+        ('overview', 'Overview', 'fa-gauge-high'),
+        ('users', 'Users & Moderation', 'fa-users'),
+        ('socials', 'Socials', 'fa-share-nodes'),
+        ('credits', 'Credits & Economy', 'fa-coins'),
+        ('announcements', 'Announcements', 'fa-bullhorn'),
+        ('links', 'Links Inspector', 'fa-link'),
+        ('system', 'Site & System', 'fa-sliders'),
+        ('logs', 'Audit Logs', 'fa-clipboard-list'),
+    ]
+    sidebar_html = ''.join(
+        f'<a class="{"active" if k == tab else ""}" href="/admin?tab={k}"><i class="fa-solid {icon}"></i> {label}</a>'
+        for k, label, icon in admin_tabs
+    )
 
-    all_anns = Announcement.query.order_by(Announcement.created.desc()).all()
-    ann_rows = ''.join(
-        f"""<div class="row">
-            <span><b>{escape(a.title)}</b> — {escape(a.body)} <small style="opacity:0.65;">({'Active' if a.active else 'Hidden'})</small></span>
-            <div style="display:flex;gap:5px;">
-                <form method="post"><input type="hidden" name="action" value="toggle_announcement"><input type="hidden" name="ann_id" value="{a.id}"><button class="mini">{'Hide' if a.active else 'Show'}</button></form>
-                <form method="post"><input type="hidden" name="action" value="delete_announcement"><input type="hidden" name="ann_id" value="{a.id}"><button class="mini"><i class="fa-solid fa-trash"></i></button></form>
-            </div>
+    # --- RENDER SELECTED ADMIN TAB ---
+    if tab == 'overview':
+        total_users = User.query.count()
+        banned_users = User.query.filter_by(is_banned=True).count()
+        total_links = Link.query.count()
+        total_clicks = db.session.query(db.func.coalesce(db.func.sum(Link.clicks), 0)).scalar() or 0
+        total_views = db.session.query(db.func.coalesce(db.func.sum(Profile.views), 0)).scalar() or 0
+        total_credits = db.session.query(db.func.coalesce(db.func.sum(User.credits), 0)).scalar() or 0
+        recent_users = User.query.order_by(User.created.desc()).limit(6).all()
+        recent_html = ''.join(
+            f'<div class="row"><span><b>@{escape(u.username)}</b> <small style="color:#a1a1aa;">({escape(u.email)})</small></span><small>{u.created.strftime("%Y-%m-%d %H:%M")}</small></div>'
+            for u in recent_users
+        )
+        tab_body = f"""
+        <h2><i class="fa-solid fa-shield-halved" style="color:#ff4b4b;"></i> Staff Control Center</h2>
+        <div class="stats">
+            <div class="stat"><i class="fa-solid fa-users" style="color:#8b5cf6;"></i><span>{total_users}</span>Total Users</div>
+            <div class="stat"><i class="fa-solid fa-eye" style="color:#3b82f6;"></i><span>{total_views}</span>Total Views</div>
+            <div class="stat"><i class="fa-solid fa-link" style="color:#10b981;"></i><span>{total_links}</span>Total Links</div>
+            <div class="stat"><i class="fa-solid fa-arrow-pointer" style="color:#06b6d4;"></i><span>{total_clicks}</span>Link Clicks</div>
+            <div class="stat"><i class="fa-solid fa-coins" style="color:#fbbf24;"></i><span>{total_credits}</span>Circulating Credits</div>
+            <div class="stat"><i class="fa-solid fa-ban" style="color:#ef4444;"></i><span>{banned_users}</span>Banned Users</div>
+        </div>
+        <div class="card">
+            <h3>Newest Signups</h3>
+            {recent_html or '<p>No users yet.</p>'}
         </div>"""
-        for a in all_anns
-    ) or '<p style="opacity:0.7;">No announcements yet.</p>'
 
-    user_rows = ''
-    for u in users:
-        u_badges = ', '.join(b.name for b in u.badges) or 'None'
-        status_tag = f'<span style="color:#ef4444;font-weight:700;">BANNED ({escape(u.ban_reason)})</span>' if u.is_banned else '<span style="color:#10b981;">Active</span>'
-        user_rows += f"""<div class="row" style="flex-direction: column; align-items: flex-start; gap: 0.65rem; padding: 1.1rem 0;">
-            <div style="display:flex; justify-content:space-between; width:100%; flex-wrap:wrap; gap:8px;">
-                <div><b style="font-size:1.1rem;">@{u.username}</b> <span style="margin-left:8px;font-size:0.85rem;">{status_tag}</span></div>
-                <span style="font-size: 0.9rem; color: #a1a1aa;">{escape(u.email)} • Warnings: {len(u.warnings)}</span>
+    elif tab == 'socials':
+        tab_body = f"""
+        <form method="post" class="card">
+            <h2><i class="fa-solid fa-share-nodes" style="color:#8b5cf6;"></i> Official Site Socials</h2>
+            <p style="color:#a1a1aa;margin:0.4rem 0 1.2rem 0;">Links configured here appear on the public <a href="/socials" target="_blank" style="color:#8b5cf6;">/socials</a> page. Leave blank to hide a platform.</p>
+            <input type="hidden" name="action" value="save_socials">
+            <div class="grid-2">
+                <label><i class="fa-brands fa-discord"></i> Discord Invite URL<input name="social_discord" value="{escape(get_setting('social_discord', ''))}" placeholder="https://discord.gg/..."></label>
+                <label><i class="fa-brands fa-x-twitter"></i> X / Twitter URL<input name="social_twitter" value="{escape(get_setting('social_twitter', ''))}" placeholder="https://x.com/..."></label>
+                <label><i class="fa-brands fa-youtube"></i> YouTube URL<input name="social_youtube" value="{escape(get_setting('social_youtube', ''))}" placeholder="https://youtube.com/@..."></label>
+                <label><i class="fa-brands fa-tiktok"></i> TikTok URL<input name="social_tiktok" value="{escape(get_setting('social_tiktok', ''))}" placeholder="https://tiktok.com/@..."></label>
+                <label><i class="fa-brands fa-github"></i> GitHub URL<input name="social_github" value="{escape(get_setting('social_github', ''))}" placeholder="https://github.com/..."></label>
+                <label><i class="fa-brands fa-instagram"></i> Instagram URL<input name="social_instagram" value="{escape(get_setting('social_instagram', ''))}" placeholder="https://instagram.com/..."></label>
             </div>
-            <div style="font-size: 0.9rem; color:#8b5cf6;">Badges: {u_badges}</div>
+            <button class="btn" style="margin-top:1rem;"><i class="fa-solid fa-floppy-disk"></i> Save Official Socials</button>
+        </form>"""
 
-            <div style="display:flex; gap: 0.5rem; width:100%; flex-wrap: wrap;">
-                <form method="post" style="display:flex; gap:5px; align-items:center;">
-                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
-                    <select name="badge_name" style="margin:0; padding:0.4rem; width:auto;">{badge_options_html}</select>
-                    <button name="action" value="give" class="btn" style="padding:0.4rem 0.8rem;">Give</button>
-                    <button name="action" value="remove" class="mini" style="padding:0.4rem 0.8rem;">Remove</button>
-                </form>
+    elif tab == 'credits':
+        top_rich = User.query.order_by(User.credits.desc()).limit(10).all()
+        rich_rows = ''.join(
+            f'<div class="row"><span><b>@{escape(u.username)}</b></span><span style="color:#fbbf24;font-weight:700;"><i class="fa-solid fa-coins"></i> {u.credits or 0}</span></div>'
+            for u in top_rich
+        )
+        tab_body = f"""
+        <div class="card">
+            <h2><i class="fa-solid fa-coins" style="color:#fbbf24;"></i> Credits & Economy Manager</h2>
+            <p style="color:#a1a1aa;margin-top:0.3rem;">Grant or deduct credits, trigger site-wide drops, and edit the public <a href="/credits" target="_blank" style="color:#8b5cf6;">/credits</a> page.</p>
+        </div>
 
-                <form method="post" style="display:flex; gap:5px; align-items:center;">
-                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
-                    <input type="hidden" name="action" value="give_views">
-                    <input type="number" name="view_amount" placeholder="Views" style="width:90px; margin:0; padding:0.4rem;" required>
-                    <button class="mini" style="padding:0.4rem 0.8rem;">+ Views</button>
-                </form>
+        <div class="grid-2">
+            <form method="post" class="card">
+                <h3>Adjust User Credits</h3>
+                <input type="hidden" name="action" value="grant_credits">
+                <label>Username<input name="username" placeholder="e.g. dvora" required></label>
+                <label>Amount (use negative to deduct)<input type="number" name="credit_amount" placeholder="e.g. 500 or -100" required></label>
+                <label>Reason<input name="credit_reason" placeholder="Event winner / Staff gift"></label>
+                <button class="btn" style="margin-top:0.8rem;">Apply Credits</button>
+            </form>
 
-                <form method="post" style="display:flex; gap:5px; align-items:center;">
-                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
-                    <input type="hidden" name="action" value="impersonate">
-                    <button class="mini" style="padding:0.4rem 0.8rem;border-color:#fbbf24;color:#fbbf24;"><i class="fa-solid fa-right-to-bracket"></i> Login As</button>
-                </form>
+            <form method="post" class="card">
+                <h3>Global Credit Drop (All Users)</h3>
+                <input type="hidden" name="action" value="grant_all_credits">
+                <label>Credits per User<input type="number" name="mass_amount" placeholder="e.g. 250" required></label>
+                <label>Drop Reason<input name="mass_reason" placeholder="Weekend celebration drop"></label>
+                <button class="btn" style="margin-top:0.8rem;background:#fbbf24;color:#000;"><i class="fa-solid fa-gift"></i> Send to Everyone</button>
+            </form>
+        </div>
+
+        <form method="post" class="card">
+            <h3>Economy Rates & Public /credits Page Content</h3>
+            <input type="hidden" name="action" value="save_credits_page">
+            <div class="grid-2">
+                <label>New Signup Bonus Credits<input type="number" name="signup_bonus_credits" min="0" value="{escape(get_setting('signup_bonus_credits', '100'))}"></label>
+                <label>Daily Claim Reward Credits<input type="number" name="daily_claim_credits" min="0" value="{escape(get_setting('daily_claim_credits', '50'))}"></label>
             </div>
+            <label>Credits Tagline<input name="credits_text" value="{escape(get_setting('credits_text', ''))}"></label>
+            <label>Core Team Lines (one per line)<textarea name="credits_team" rows="4">{escape(get_setting('credits_team', ''))}</textarea></label>
+            <label>Community & Supporters Note<textarea name="credits_supporters" rows="3">{escape(get_setting('credits_supporters', ''))}</textarea></label>
+            <button class="btn" style="margin-top:0.8rem;"><i class="fa-solid fa-floppy-disk"></i> Save Credits Settings</button>
+        </form>
 
-            <div style="display:flex; gap: 0.5rem; width:100%; flex-wrap: wrap;">
-                <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:240px;">
-                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
-                    <input name="ban_reason" placeholder="Ban reason..." style="margin:0; padding:0.4rem;">
-                    {'<button name="action" value="unban" class="btn" style="padding:0.4rem 0.8rem;background:#10b981;color:#000;">Unban</button>' if u.is_banned else '<button name="action" value="ban" class="mini" style="padding:0.4rem 0.8rem;border-color:#ef4444;color:#ef4444;">Ban</button>'}
-                </form>
+        <div class="card">
+            <h3>Richest Users Leaderboard</h3>
+            {rich_rows or '<p>No users.</p>'}
+        </div>"""
 
-                <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:240px;">
-                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
-                    <input type="hidden" name="action" value="warn">
-                    <input name="warn_reason" placeholder="Warning reason..." style="margin:0; padding:0.4rem;" required>
-                    <button class="mini" style="padding:0.4rem 0.8rem;border-color:#f59e0b;color:#f59e0b;">Warn</button>
-                </form>
+    elif tab == 'announcements':
+        all_anns = Announcement.query.order_by(Announcement.created.desc()).all()
+        ann_rows = ''.join(
+            f"""<div class="row">
+                <span><b>{escape(a.title)}</b> — {escape(a.body)} <small style="opacity:0.65;">({'Active' if a.active else 'Hidden'})</small></span>
+                <div style="display:flex;gap:5px;">
+                    <form method="post"><input type="hidden" name="action" value="toggle_announcement"><input type="hidden" name="ann_id" value="{a.id}"><button class="mini">{'Hide' if a.active else 'Show'}</button></form>
+                    <form method="post"><input type="hidden" name="action" value="delete_announcement"><input type="hidden" name="ann_id" value="{a.id}"><button class="mini"><i class="fa-solid fa-trash"></i></button></form>
+                </div>
+            </div>"""
+            for a in all_anns
+        ) or '<p style="opacity:0.7;">No announcements yet.</p>'
 
-                <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:260px;">
-                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
-                    <input type="hidden" name="action" value="message">
-                    <input name="dm_body" placeholder="Send direct message..." style="margin:0; padding:0.4rem;" required>
-                    <button class="btn" style="padding:0.4rem 0.8rem;">Message</button>
-                </form>
+        tab_body = f"""
+        <div class="card">
+            <h2><i class="fa-solid fa-bullhorn" style="color:#38bdf8;"></i> Global Banner Announcements</h2>
+            <form method="post" style="margin-top:0.8rem;">
+                <input type="hidden" name="action" value="create_announcement">
+                <div class="grid-2">
+                    <input name="ann_title" placeholder="Title (e.g. New Update Live)" required>
+                    <input name="ann_body" placeholder="Message shown across the site..." required>
+                </div>
+                <button class="btn" style="margin-top:0.5rem;">Publish Announcement</button>
+            </form>
+            <div style="margin-top:1.2rem;">{ann_rows}</div>
+        </div>"""
+
+    elif tab == 'links':
+        ql = q_val.lower()
+        all_links = Link.query.order_by(Link.id.desc()).limit(100).all()
+        if ql:
+            all_links = [l for l in all_links if ql in l.url.lower() or (l.label and ql in l.label.lower()) or (l.user and ql in l.user.username.lower())]
+        l_rows = ''.join(
+            f"""<div class="row">
+                <div style="overflow:hidden;text-overflow:ellipsis;">
+                    <b>@{escape(l.user.username if l.user else 'unknown')}</b> • <span style="color:#8b5cf6;">{escape(l.platform)}</span> ({l.clicks} clicks) {'<small style="color:#f59e0b;">[Hidden]</small>' if not l.visible else ''}
+                    <div style="font-size:0.82rem;color:#a1a1aa;word-break:break-all;">{escape(l.url)}</div>
+                </div>
+                <div style="display:flex;gap:5px;flex-shrink:0;">
+                    <form method="post"><input type="hidden" name="action" value="admin_toggle_link"><input type="hidden" name="link_id" value="{l.id}"><input type="hidden" name="q" value="{escape(q_val)}"><button class="mini"><i class="fa-solid fa-eye"></i></button></form>
+                    <form method="post"><input type="hidden" name="action" value="admin_delete_link"><input type="hidden" name="link_id" value="{l.id}"><input type="hidden" name="q" value="{escape(q_val)}"><button class="mini" style="border-color:#ef4444;color:#ef4444;"><i class="fa-solid fa-trash"></i></button></form>
+                </div>
+            </div>"""
+            for l in all_links
+        ) or '<p style="color:#a1a1aa;">No matching links found.</p>'
+
+        tab_body = f"""
+        <div class="card">
+            <h2><i class="fa-solid fa-link" style="color:#8b5cf6;"></i> Links Inspector</h2>
+            <form method="get" style="display:flex;gap:0.5rem;margin:1rem 0;">
+                <input type="hidden" name="tab" value="links">
+                <input name="q" value="{escape(q_val)}" placeholder="Filter by username, label, or URL..." style="margin:0;">
+                <button class="btn">Filter</button>
+            </form>
+            {l_rows}
+        </div>"""
+
+    elif tab == 'system':
+        maint_checked = 'checked' if get_setting('maintenance_mode', '0') == '1' else ''
+        reg_checked = 'checked' if get_setting('registrations_open', '1') == '1' else ''
+        tab_body = f"""
+        <form method="post" class="card">
+            <h2><i class="fa-solid fa-sliders" style="color:#8b5cf6;"></i> Site & System Controls</h2>
+            <input type="hidden" name="action" value="save_system">
+            <label>Site Name / Domain Branding<input name="site_name" value="{escape(get_setting('site_name', 'Dvora.lol'))}"></label>
+            <label style="display:flex;align-items:center;gap:10px;margin-top:1rem;cursor:pointer;">
+                <input type="checkbox" name="registrations_open" {reg_checked} style="width:auto;margin:0;"> Allow New User Registrations
+            </label>
+            <label style="display:flex;align-items:center;gap:10px;margin-top:0.8rem;cursor:pointer;color:#f59e0b;">
+                <input type="checkbox" name="maintenance_mode" {maint_checked} style="width:auto;margin:0;"> Enable Maintenance Mode (Staff can still access /admin)
+            </label>
+            <button class="btn" style="margin-top:1.2rem;"><i class="fa-solid fa-floppy-disk"></i> Save System Settings</button>
+        </form>"""
+
+    elif tab == 'logs':
+        logs = AuditLog.query.order_by(AuditLog.created.desc()).limit(100).all()
+        log_rows = ''.join(
+            f"""<div class="row">
+                <span><b style="color:#8b5cf6;">@{escape(lg.actor)}</b> • <b>{escape(lg.action)}</b> {escape(lg.target)} <small style="color:#a1a1aa;">{escape(lg.details)}</small></span>
+                <small style="flex-shrink:0;">{lg.created.strftime('%Y-%m-%d %H:%M')}</small>
+            </div>"""
+            for lg in logs
+        ) or '<p style="color:#a1a1aa;">No staff audit logs recorded yet.</p>'
+
+        tab_body = f"""
+        <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+                <h2><i class="fa-solid fa-clipboard-list" style="color:#8b5cf6;"></i> Staff Audit Logs</h2>
+                <form method="post"><input type="hidden" name="action" value="clear_audit_logs"><button class="mini">Clear Logs</button></form>
             </div>
+            {log_rows}
+        </div>"""
+
+    else:  # 'users' tab
+        ql = q_val.lower()
+        users = User.query.filter(User.username.ilike(f'%{ql}%')).all() if ql else User.query.order_by(User.created.desc()).all()
+        badge_options_html = ''.join(f'<option value="{b["name"]}">{b["name"]}</option>' for b in BADGES_LIST)
+        user_rows = ''
+        for u in users:
+            u_badges = ', '.join(b.name for b in u.badges) or 'None'
+            status_tag = f'<span style="color:#ef4444;font-weight:700;">BANNED ({escape(u.ban_reason)})</span>' if u.is_banned else '<span style="color:#10b981;">Active</span>'
+            views_count = u.profile.views if u.profile else 0
+            user_rows += f"""<div class="row" style="flex-direction: column; align-items: flex-start; gap: 0.65rem; padding: 1.2rem 0;">
+                <div style="display:flex; justify-content:space-between; width:100%; flex-wrap:wrap; gap:8px;">
+                    <div>
+                        <a href="/{u.username}" target="_blank" style="font-size:1.1rem;font-weight:700;color:#fff;text-decoration:none;">@{u.username}</a>
+                        <span style="margin-left:8px;font-size:0.85rem;">{status_tag}</span>
+                    </div>
+                    <span style="font-size: 0.88rem; color: #a1a1aa;">{escape(u.email)} • Views: {views_count} • Credits: <b style="color:#fbbf24;">{u.credits or 0}</b> • Warnings: {len(u.warnings)}</span>
+                </div>
+                <div style="font-size: 0.88rem; color:#8b5cf6;">Badges: {u_badges}</div>
+
+                <div style="display:flex; gap: 0.5rem; width:100%; flex-wrap: wrap;">
+                    <form method="post" style="display:flex; gap:5px; align-items:center;">
+                        <input type="hidden" name="tab" value="users"><input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(q_val)}">
+                        <select name="badge_name" style="margin:0; padding:0.4rem; width:auto;">{badge_options_html}</select>
+                        <button name="action" value="give" class="btn" style="padding:0.4rem 0.8rem;">Give</button>
+                        <button name="action" value="remove" class="mini" style="padding:0.4rem 0.8rem;">Remove</button>
+                    </form>
+
+                    <form method="post" style="display:flex; gap:5px; align-items:center;">
+                        <input type="hidden" name="tab" value="users"><input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(q_val)}">
+                        <input type="hidden" name="action" value="give_views">
+                        <input type="number" name="view_amount" placeholder="Views" style="width:90px; margin:0; padding:0.4rem;" required>
+                        <button class="mini" style="padding:0.4rem 0.8rem;">+ Views</button>
+                    </form>
+
+                    <form method="post" style="display:flex; gap:5px; align-items:center;">
+                        <input type="hidden" name="tab" value="users"><input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(q_val)}">
+                        <input type="hidden" name="action" value="impersonate">
+                        <button class="mini" style="padding:0.4rem 0.8rem;border-color:#fbbf24;color:#fbbf24;"><i class="fa-solid fa-right-to-bracket"></i> Login As</button>
+                    </form>
+                </div>
+
+                <div style="display:flex; gap: 0.5rem; width:100%; flex-wrap: wrap;">
+                    <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:220px;">
+                        <input type="hidden" name="tab" value="users"><input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(q_val)}">
+                        <input name="ban_reason" placeholder="Ban reason..." style="margin:0; padding:0.4rem;">
+                        {'<button name="action" value="unban" class="btn" style="padding:0.4rem 0.8rem;background:#10b981;color:#000;">Unban</button>' if u.is_banned else '<button name="action" value="ban" class="mini" style="padding:0.4rem 0.8rem;border-color:#ef4444;color:#ef4444;">Ban</button>'}
+                    </form>
+
+                    <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:220px;">
+                        <input type="hidden" name="tab" value="users"><input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(q_val)}">
+                        <input type="hidden" name="action" value="warn">
+                        <input name="warn_reason" placeholder="Warning reason..." style="margin:0; padding:0.4rem;" required>
+                        <button class="mini" style="padding:0.4rem 0.8rem;border-color:#f59e0b;color:#f59e0b;">Warn</button>
+                    </form>
+
+                    <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:240px;">
+                        <input type="hidden" name="tab" value="users"><input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(q_val)}">
+                        <input type="hidden" name="action" value="message">
+                        <input name="dm_body" placeholder="Direct message..." style="margin:0; padding:0.4rem;" required>
+                        <button class="btn" style="padding:0.4rem 0.8rem;">Message</button>
+                    </form>
+                </div>
+
+                <div style="display:flex; gap: 0.5rem; width:100%; flex-wrap: wrap;">
+                    <form method="post" style="display:flex; gap:5px; align-items:center;">
+                        <input type="hidden" name="tab" value="users"><input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(q_val)}">
+                        <input type="hidden" name="action" value="reset_password">
+                        <input type="password" name="new_pw" placeholder="New password (6+ chars)" minlength="6" style="margin:0; padding:0.4rem; width:190px;" required>
+                        <button class="mini" style="padding:0.4rem 0.8rem;">Reset Password</button>
+                    </form>
+
+                    <form method="post" onsubmit="return confirm('Permanently delete @{u.username}?');">
+                        <input type="hidden" name="tab" value="users"><input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(q_val)}">
+                        <input type="hidden" name="action" value="delete_user">
+                        <button class="mini" style="padding:0.4rem 0.8rem;border-color:#ef4444;color:#ef4444;"><i class="fa-solid fa-user-xmark"></i> Delete User</button>
+                    </form>
+                </div>
+            </div>"""
+
+        tab_body = f"""
+        <div class="card">
+            <h2><i class="fa-solid fa-users" style="color:#8b5cf6;"></i> Users & Moderation ({len(users)})</h2>
+            <form method="get" style="display:flex; gap:0.5rem; margin:1rem 0;">
+                <input type="hidden" name="tab" value="users">
+                <input name="q" value="{escape(q_val)}" placeholder="Search username..." style="margin:0;">
+                <button class="btn">Search</button>
+            </form>
+            {user_rows or '<p>No users found.</p>'}
         </div>"""
 
     return page(f"""
-    <div class="card">
-        <h2><i class="fa-solid fa-bullhorn" style="color:#38bdf8;"></i> Host Global Announcement</h2>
-        <form method="post" class="grid-2" style="margin-top:0.75rem;">
-            <input type="hidden" name="action" value="create_announcement">
-            <input name="ann_title" placeholder="Announcement Title" required>
-            <input name="ann_body" placeholder="Announcement Message" required>
-        </form>
-        <form method="post" style="margin-top:0.5rem;">
-            <input type="hidden" name="action" value="create_announcement">
-            <div class="grid-2">
-                <input name="ann_title" placeholder="Title (e.g. Server Maintenance)" required>
-                <input name="ann_body" placeholder="Message shown to users..." required>
-            </div>
-            <button class="btn" style="margin-top:0.5rem;">Publish Announcement</button>
-        </form>
-        <div style="margin-top:1rem;">{ann_rows}</div>
-    </div>
-
-    <div class="card">
-        <h2><i class="fa-solid fa-shield-halved" style="color:#ff4b4b;"></i> Staff Admin Panel</h2>
-        <form method="get" style="display:flex; gap:0.5rem; margin:1rem 0;">
-            <input name="q" value="{escape(query)}" placeholder="Search username..." style="margin:0;">
-            <button class="btn">Search</button>
-        </form>
-        {user_rows or '<p>No users found.</p>'}
+    <div class="dash">
+        <aside>
+            <div style="padding:0.5rem 1rem;font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#ff4b4b;">Staff Panel</div>
+            {sidebar_html}
+        </aside>
+        <section class="dash-body">{tab_body}</section>
     </div>""", 'Admin Panel')
 
 
@@ -895,6 +1580,43 @@ PUBLIC_PROFILE_HTML = """
     background-position: center;
     background-attachment: fixed;
     overflow-x: hidden;
+  }
+  .enter-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(5, 5, 10, 0.92);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    cursor: pointer;
+    transition: opacity 0.35s ease, visibility 0.35s ease;
+  }
+  .enter-overlay.hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .enter-box {
+    text-align: center;
+    padding: 2rem;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  }
+  .enter-title {
+    font-size: 1.5rem;
+    font-weight: 800;
+    letter-spacing: 0.4px;
+    color: #ffffff;
+  }
+  .enter-sub {
+    margin-top: 0.45rem;
+    font-size: 0.88rem;
+    color: #a1a1aa;
   }
   .profile-card {
     width: 100%;
@@ -1002,6 +1724,13 @@ PUBLIC_PROFILE_HTML = """
 </style>
 </head>
 <body>
+  <div id="enterOverlay" class="enter-overlay" role="button" tabindex="0" aria-label="Click to Enter">
+    <div class="enter-box">
+      <div class="enter-title"><i class="fa-solid fa-door-open" style="color:{{ p.accent }};margin-right:8px;"></i>Click to Enter</div>
+      <div class="enter-sub">View {{ p.display_name or user.username }}'s profile</div>
+    </div>
+  </div>
+
   <div class="profile-card">
     <div class="banner"></div>
     <div class="card-inner">
@@ -1049,7 +1778,7 @@ PUBLIC_PROFILE_HTML = """
           <span><i class="fa-solid fa-music" style="color:{{ p.accent }};margin-right:6px;"></i>{{ p.audio_title or 'Profile Audio' }}</span>
           {% if audio_ext %}<span style="font-size:0.72rem;opacity:0.65;text-transform:uppercase;">{{ audio_ext }}</span>{% endif %}
         </div>
-        <audio controls preload="metadata" src="{{ audio_src }}"></audio>
+        <audio id="profileAudio" controls loop preload="auto" src="{{ audio_src }}"></audio>
       </div>
       {% endif %}
 
@@ -1077,6 +1806,28 @@ PUBLIC_PROFILE_HTML = """
       </div>
     </div>
   </div>
+
+  <script>
+    (function () {
+      const overlay = document.getElementById('enterOverlay');
+      const audio = document.getElementById('profileAudio');
+
+      function enterProfile() {
+        overlay.classList.add('hidden');
+        if (audio) {
+          audio.play().catch(function () {});
+        }
+      }
+
+      overlay.addEventListener('click', enterProfile);
+      overlay.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          enterProfile();
+        }
+      });
+    })();
+  </script>
 </body>
 </html>
 """
