@@ -114,9 +114,7 @@ class User(UserMixin, db.Model):
     def is_admin(self):
         return self.username == 'dvora'
 
-    @property
-    def is_admin(self):
-        return self.username == 'ban'
+class Profile(db.Model):
 
 class Profile(db.Model):
     id = db.Column(db.Integer, primary_key=True)
