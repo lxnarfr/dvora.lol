@@ -5,7 +5,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
 
-app = Flask(__name__, static_folder='static', static_url_path='/static')
+app = Flask(__name__, static_folder='.', static_url_path='/static')
 app.config['SECRET_KEY'] = secrets.token_hex(32)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///dvora.db'
 app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'uploads')
