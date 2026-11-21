@@ -824,7 +824,6 @@ def admin():
                 <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:240px;">
                     <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
                     <input name="ban_reason" placeholder="Ban reason..." style="margin:0; padding:0.4rem;">
-                    {% if False %}{% endif %}
                     {'<button name="action" value="unban" class="btn" style="padding:0.4rem 0.8rem;background:#10b981;color:#000;">Unban</button>' if u.is_banned else '<button name="action" value="ban" class="mini" style="padding:0.4rem 0.8rem;border-color:#ef4444;color:#ef4444;">Ban</button>'}
                 </form>
 
