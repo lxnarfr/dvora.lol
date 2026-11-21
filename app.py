@@ -1,7 +1,7 @@
 import os
 import secrets
 from datetime import datetime, date
-from flask import Flask, render_template_string, request, redirect, url_for, flash, send_from_directory, abort
+from flask import Flask, render_template_string, request, redirect, url_for, flash, send_from_directory, abort, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -9,9 +9,14 @@ from markupsafe import escape
 
 app = Flask(__name__, static_folder='.', static_url_path='/static')
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///dvora.db'
+
+os.makedirs(app.instance_path, exist_ok=True)
+db_path = os.path.join(app.instance_path, 'dvora.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
 app.config['UPLOAD_FOLDER'] = os.path.join(app.root_path, 'uploads')
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB for audio/MP4 uploads
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 db = SQLAlchemy(app)
@@ -21,6 +26,8 @@ login_manager.login_view = 'login'
 IMAGE_EXTS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 AUDIO_EXTS = {'mp3', 'wav', 'mp4'}
 ALLOWED = IMAGE_EXTS | AUDIO_EXTS
+
+ADMIN_BADGES = {'Developer', 'Owner', 'Moderator', 'Admin', 'Staff'}
 
 # --- 150+ BADGES DICTIONARY ---
 BADGES_LIST = [
@@ -103,20 +110,28 @@ BADGES_LIST = [
     {'name': 'Atlach-Nacha', 'icon': 'fa-spider'}
 ]
 
+
 # --- DATABASE MODELS ---
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(32), unique=True, nullable=False, index=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
+    is_banned = db.Column(db.Boolean, default=False)
+    ban_reason = db.Column(db.String(256), default='')
     created = db.Column(db.DateTime, default=datetime.utcnow)
+
     profile = db.relationship('Profile', backref='user', uselist=False, cascade='all, delete-orphan')
     links = db.relationship('Link', backref='user', cascade='all, delete-orphan', order_by='Link.position')
     badges = db.relationship('Badge', backref='user', cascade='all, delete-orphan')
+    warnings = db.relationship('Warning', backref='user', cascade='all, delete-orphan', order_by='Warning.created.desc()')
+    messages_received = db.relationship('DirectMessage', foreign_keys='DirectMessage.recipient_id', backref='recipient', cascade='all, delete-orphan', order_by='DirectMessage.created.desc()')
 
     @property
     def is_admin(self):
-        return self.username == 'dvora'
+        if self.username == 'dvora':
+            return True
+        return any(b.name in ADMIN_BADGES and b.visible for b in self.badges)
 
 
 class Profile(db.Model):
@@ -129,7 +144,7 @@ class Profile(db.Model):
     background = db.Column(db.String(128), default='')
     music_url = db.Column(db.String(512), default='')
     audio_file = db.Column(db.String(128), default='')
-    audio_icon = db.Column(db.String(128), default='')
+    audio_title = db.Column(db.String(128), default='')
     discord_user = db.Column(db.String(64), default='')
     discord_status = db.Column(db.String(128), default='Online')
     accent = db.Column(db.String(7), default='#8b5cf6')
@@ -168,9 +183,39 @@ class Badge(db.Model):
     visible = db.Column(db.Boolean, default=True)
 
 
+class Warning(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    issued_by = db.Column(db.String(32), nullable=False)
+    reason = db.Column(db.String(512), nullable=False)
+    created = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class DirectMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    recipient_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    created = db.Column(db.DateTime, default=datetime.utcnow)
+    sender = db.relationship('User', foreign_keys=[sender_id])
+
+
+class Announcement(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(128), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    author = db.Column(db.String(32), nullable=False)
+    active = db.Column(db.Boolean, default=True)
+    created = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 @login_manager.user_loader
 def load_user(uid):
-    return db.session.get(User, int(uid))
+    user = db.session.get(User, int(uid))
+    if user and not user.profile:
+        user.profile = Profile(display_name=user.username, page_title=f'{user.username} | Dvora.lol')
+        db.session.commit()
+    return user
 
 
 def allowed_file(name, allowed_set=ALLOWED):
@@ -190,7 +235,7 @@ def save_upload(file, allowed_set=ALLOWED):
 
 
 def delete_upload(fname):
-    if fname and not fname.startswith('fa-'):
+    if fname:
         path = os.path.join(app.config['UPLOAD_FOLDER'], fname)
         if os.path.exists(path):
             os.remove(path)
@@ -205,23 +250,26 @@ BASE = """
 <title>{{ title or 'Dvora.lol' }}</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <link rel="stylesheet" href="/static/style.css">
-<script>
-    document.addEventListener('contextmenu', event => event.preventDefault());
-    document.addEventListener('keydown', function(event) {
-      if (event.key === 'F12' || (event.ctrlKey && event.shiftKey && (event.key === 'I' || event.key === 'J' || event.key === 'C')) || (event.ctrlKey && (event.key === 'u' || event.key === 'U'))) {
-        event.preventDefault(); return false;
-      }
-    });
-</script>
 </head>
 <body>
 <canvas id="particles" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:-1;pointer-events:none;"></canvas>
 <nav><a href="/" class="brand">Dvora<span>.lol</span></a><div>
+{% if session.get('impersonator_id') %}
+<a href="/admin/stop-impersonate" style="color: #fbbf24; font-weight: bold;"><i class="fa-solid fa-user-secret"></i> Exit Impersonation</a>
+{% endif %}
 {% if current_user.is_authenticated %}
 {% if current_user.is_admin %}<a href="/admin" style="color: #ff4b4b; font-weight: bold;"><i class="fa-solid fa-shield-halved"></i> Admin</a>{% endif %}
 <a href="/dashboard"><i class="fa-solid fa-gauge"></i> Dashboard</a><a href="/logout"><i class="fa-solid fa-arrow-right-from-bracket"></i> Logout</a>
 {% else %}<a href="/login">Login</a><a href="/register">Register</a>{% endif %}
-</div></nav><main>{% with m = get_flashed_messages() %}{% for x in m %}<div class="flash">{{ x }}</div>{% endfor %}{% endwith %}
+</div></nav><main>
+{% if announcements %}
+  {% for ann in announcements %}
+    <div class="flash" style="border-color:#38bdf8;background:rgba(56,189,248,0.12);color:#e0f2fe;">
+      <b><i class="fa-solid fa-bullhorn"></i> {{ ann.title }}</b> ({{ ann.author }}): {{ ann.body }}
+    </div>
+  {% endfor %}
+{% endif %}
+{% with m = get_flashed_messages() %}{% for x in m %}<div class="flash">{{ x }}</div>{% endfor %}{% endwith %}
 {{ body|safe }}</main>
 <script>
     const canvas = document.getElementById('particles');
@@ -254,7 +302,8 @@ BASE = """
 
 
 def page(body, title='Dvora.lol'):
-    return render_template_string(BASE, body=body, title=title)
+    active_anns = Announcement.query.filter_by(active=True).order_by(Announcement.created.desc()).limit(3).all()
+    return render_template_string(BASE, body=body, title=title, announcements=active_anns)
 
 
 @app.route('/')
@@ -305,6 +354,9 @@ def login():
         u = request.form['username'].strip().lower()
         user = User.query.filter_by(username=u).first()
         if user and check_password_hash(user.password_hash, request.form['password']):
+            if user.is_banned:
+                flash(f"Your account is banned. Reason: {user.ban_reason or 'Violation of terms.'}")
+                return redirect('/login')
             login_user(user)
             return redirect('/dashboard')
         flash('Invalid credentials')
@@ -317,8 +369,22 @@ def login():
 @app.route('/logout')
 @login_required
 def logout():
+    session.pop('impersonator_id', None)
     logout_user()
     return redirect('/')
+
+
+@app.route('/admin/stop-impersonate')
+@login_required
+def stop_impersonate():
+    admin_id = session.pop('impersonator_id', None)
+    if admin_id:
+        admin_user = db.session.get(User, int(admin_id))
+        if admin_user:
+            login_user(admin_user)
+            flash('Returned to your staff session.')
+            return redirect('/admin')
+    return redirect('/dashboard')
 
 
 def dash(body, active):
@@ -334,11 +400,23 @@ def dash(body, active):
 @login_required
 def dashboard():
     p = current_user.profile
+    warn_html = ''
+    if current_user.warnings:
+        items = ''.join(f'<div class="row"><span><b>{escape(w.reason)}</b> <small style="opacity:0.7;">by @{escape(w.issued_by)}</small></span><small>{w.created.strftime("%Y-%m-%d")}</small></div>' for w in current_user.warnings)
+        warn_html = f'<div class="card" style="border-color:rgba(245,158,11,0.4);"><h3><i class="fa-solid fa-triangle-exclamation" style="color:#f59e0b;"></i> Warnings ({len(current_user.warnings)})</h3>{items}</div>'
+
+    msg_html = ''
+    if current_user.messages_received:
+        m_items = ''.join(f'<div class="row"><span><b>@{escape(m.sender.username if m.sender else "Staff")}:</b> {escape(m.body)}</span><small>{m.created.strftime("%Y-%m-%d %H:%M")}</small></div>' for m in current_user.messages_received)
+        msg_html = f'<div class="card"><h3><i class="fa-solid fa-envelope" style="color:#8b5cf6;"></i> Messages ({len(current_user.messages_received)})</h3>{m_items}</div>'
+
     return dash(f"""<h2>Welcome, {escape(p.display_name)}</h2>
 <div class="stats"><div class="stat"><i class="fa-solid fa-eye" style="color:#3b82f6;"></i><span>{p.views}</span>Profile views</div>
 <div class="stat"><i class="fa-solid fa-link" style="color:#8b5cf6;"></i><span>{len(current_user.links)}</span>Links</div>
 <div class="stat"><i class="fa-solid fa-arrow-pointer" style="color:#10b981;"></i><span>{sum(l.clicks for l in current_user.links)}</span>Total clicks</div></div>
-<div class="card"><p>Your public page is live at: <a href="/{current_user.username}" target="_blank" style="color:#8b5cf6;font-weight:bold;">/{current_user.username}</a></p></div>""", 'overview')
+<div class="card"><p>Your public page is live at: <a href="/{current_user.username}" target="_blank" style="color:#8b5cf6;font-weight:bold;">/{current_user.username}</a></p></div>
+{warn_html}
+{msg_html}""", 'overview')
 
 
 @app.route('/dashboard/profile', methods=['GET', 'POST'])
@@ -349,6 +427,7 @@ def edit_profile():
         p.display_name = request.form.get('display_name', '')[:64]
         p.bio = request.form.get('bio', '')[:500]
         p.music_url = request.form.get('music_url', '')[:512]
+        p.audio_title = request.form.get('audio_title', '')[:128]
         p.discord_user = request.form.get('discord_user', '')[:64]
         p.discord_status = request.form.get('discord_status', '')[:128]
         p.page_title = request.form.get('page_title', '')[:128]
@@ -357,16 +436,11 @@ def edit_profile():
             delete_upload(p.audio_file)
             p.audio_file = ''
 
-        if request.form.get('reset_audio_icon'):
-            delete_upload(p.audio_icon)
-            p.audio_icon = ''
-
         a = save_upload(request.files.get('avatar'), IMAGE_EXTS)
         b = save_upload(request.files.get('banner'), IMAGE_EXTS)
         bg = save_upload(request.files.get('background'), IMAGE_EXTS)
-        au = save_upload(request.files.get('audio'), AUDIO_EXTS)
-        icon_img = save_upload(request.files.get('audio_icon_file'), IMAGE_EXTS)
-        icon_fa = request.form.get('audio_icon_fa', '').strip()[:64]
+        audio_upload = request.files.get('audio')
+        au = save_upload(audio_upload, AUDIO_EXTS)
 
         if a:
             delete_upload(p.avatar)
@@ -380,35 +454,24 @@ def edit_profile():
         if au:
             delete_upload(p.audio_file)
             p.audio_file = au
-        if icon_img:
-            delete_upload(p.audio_icon)
-            p.audio_icon = icon_img
-        elif icon_fa:
-            delete_upload(p.audio_icon)
-            p.audio_icon = icon_fa if icon_fa.startswith('fa-') else f'fa-{icon_fa}'
+            if not p.audio_title and audio_upload and audio_upload.filename:
+                p.audio_title = os.path.splitext(audio_upload.filename)[0][:128]
 
         db.session.commit()
         flash('Profile saved successfully!')
         return redirect('/dashboard/profile')
 
-    audio_status_html = ''
+    current_audio_html = ''
     if p.audio_file:
-        audio_status_html = f"""
-        <div style="margin:0.5rem 0 0.9rem;padding:0.75rem 1rem;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">
-            <span style="font-size:0.88rem;"><i class="fa-solid fa-music" style="color:#8b5cf6;"></i> Uploaded: <b>{escape(p.audio_file)}</b></span>
-            <label style="display:inline-flex;align-items:center;gap:6px;margin:0;font-size:0.85rem;cursor:pointer;">
-                <input type="checkbox" name="remove_audio" value="1" style="width:auto;margin:0;"> Remove audio
+        label = escape(p.audio_title or p.audio_file)
+        current_audio_html = f"""
+        <div style="margin:0.75rem 0;padding:0.85rem;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);">
+            <div style="font-size:0.9rem;margin-bottom:0.5rem;"><i class="fa-solid fa-music" style="color:#8b5cf6;"></i> Current Audio: <b>{label}</b></div>
+            <audio controls preload="metadata" src="/uploads/{p.audio_file}" style="width:100%;"></audio>
+            <label style="display:flex;align-items:center;gap:8px;margin-top:0.5rem;font-size:0.85rem;cursor:pointer;">
+                <input type="checkbox" name="remove_audio" value="1" style="width:auto;margin:0;"> Remove uploaded audio
             </label>
         </div>"""
-
-    icon_status_html = ''
-    if p.audio_icon:
-        icon_status_html = f"""
-        <label style="display:inline-flex;align-items:center;gap:6px;margin-top:0.35rem;font-size:0.82rem;cursor:pointer;">
-            <input type="checkbox" name="reset_audio_icon" value="1" style="width:auto;margin:0;"> Reset custom icon ({escape(p.audio_icon)})
-        </label>"""
-
-    fa_val = p.audio_icon if p.audio_icon.startswith('fa-') else ''
 
     return dash(f"""<form method="post" enctype="multipart/form-data" class="card"><h2>Edit Profile</h2>
 <div class="grid-2"><label>Display name<input name="display_name" value="{escape(p.display_name)}"></label>
@@ -417,19 +480,15 @@ def edit_profile():
 <div class="grid-2"><label>Discord User<input name="discord_user" value="{escape(p.discord_user)}" placeholder="e.g. dvora"></label>
 <label>Discord Status<input name="discord_status" value="{escape(p.discord_status)}"></label></div>
 <div class="grid-2">
-  <label>Audio File (MP3, WAV, MP4)<input type="file" name="audio" accept=".mp3,.wav,.mp4,audio/mpeg,audio/wav,video/mp4"></label>
-  <label>Or Direct Audio URL<input name="music_url" value="{escape(p.music_url)}" placeholder="https://..."></label>
+  <label>Upload Audio (MP3, WAV, MP4)<input type="file" name="audio" accept=".mp3,.wav,.mp4,audio/mpeg,audio/wav,video/mp4"></label>
+  <label>Audio Track Title<input name="audio_title" value="{escape(p.audio_title)}" placeholder="e.g. Midnight Vibes"></label>
 </div>
-{audio_status_html}
-<div class="grid-2">
-  <label>Custom Icon Image<input type="file" name="audio_icon_file" accept="image/*"></label>
-  <label>Or Icon Class (e.g. fa-headphones, fa-compact-disc)<input name="audio_icon_fa" value="{escape(fa_val)}" placeholder="fa-compact-disc"></label>
-</div>
-{icon_status_html}
+{current_audio_html}
+<label>Or External Music URL (MP3/WAV)<input name="music_url" value="{escape(p.music_url)}" placeholder="https://..."></label>
 <div class="grid-2"><label>Avatar<input type="file" name="avatar" accept="image/*"></label>
 <label>Banner<input type="file" name="banner" accept="image/*"></label></div>
 <label>Custom Background Image<input type="file" name="background" accept="image/*"></label>
-<button class="btn" style="margin-top:0.75rem;"><i class="fa-solid fa-floppy-disk"></i> Save Changes</button></form>""", 'profile')
+<button class="btn"><i class="fa-solid fa-floppy-disk"></i> Save Changes</button></form>""", 'profile')
 
 
 @app.route('/dashboard/links', methods=['GET', 'POST'])
@@ -486,7 +545,7 @@ def manage_badges():
             if existing:
                 db.session.delete(existing)
             else:
-                db.session.add(Badge(user_id=current_user.id, name=name, icon=icon))
+                db.session.add(Badge(user_id=current_user.id, name=name, icon=icon, visible=True))
             db.session.commit()
             return redirect('/dashboard/badges')
 
@@ -507,7 +566,7 @@ def manage_badges():
                     <button class="{btn_class}" style="padding: 0.4rem 1rem;">{btn_text}</button>
                 </form>
             </div>"""
-        title = "Manage Your Badges (Admin)"
+        title = "Manage Your Badges (Staff)"
         subtitle = "Toggle badges to display them on your own profile."
     else:
         if user_badges:
@@ -522,7 +581,7 @@ def manage_badges():
         else:
             rows = "<p>You don't have any badges yet.</p>"
         title = "Your Badges"
-        subtitle = "These are the badges you have earned. Only admins can grant new ones."
+        subtitle = "These are the badges you have earned. Only staff can grant new ones."
 
     return dash(f"""<div class="card"><h2>{title}</h2><p style="color:#a1a1aa; margin-bottom:1rem;">{subtitle}</p>{rows}</div>""", 'badges')
 
@@ -597,6 +656,8 @@ def track_link(link_id):
     link = db.session.get(Link, link_id)
     if not link or not link.visible:
         abort(404)
+    if link.user and link.user.is_banned:
+        abort(404)
     link.clicks += 1
     db.session.add(Click(link_id=link.id))
     db.session.commit()
@@ -608,56 +669,202 @@ def track_link(link_id):
 def admin():
     if not current_user.is_admin:
         abort(403)
+
     if request.method == 'POST':
         action = request.form.get('action')
-        target_user = User.query.filter_by(username=request.form.get('username', '').lower()).first()
-        badge_name = request.form.get('badge_name')
-        badge_info = next((b for b in BADGES_LIST if b['name'] == badge_name), None)
+        q_val = request.form.get('q', '')
 
-        if target_user:
-            if action in ['give', 'remove'] and badge_info:
+        if action == 'create_announcement':
+            title = request.form.get('ann_title', '').strip()[:128]
+            body = request.form.get('ann_body', '').strip()
+            if title and body:
+                db.session.add(Announcement(title=title, body=body, author=current_user.username, active=True))
+                db.session.commit()
+                flash('Global announcement published.')
+            else:
+                flash('Announcement title and message are required.')
+            return redirect(url_for('admin', q=q_val))
+
+        if action == 'toggle_announcement':
+            ann = db.session.get(Announcement, int(request.form.get('ann_id', 0)))
+            if ann:
+                ann.active = not ann.active
+                db.session.commit()
+                flash('Announcement status updated.')
+            return redirect(url_for('admin', q=q_val))
+
+        if action == 'delete_announcement':
+            ann = db.session.get(Announcement, int(request.form.get('ann_id', 0)))
+            if ann:
+                db.session.delete(ann)
+                db.session.commit()
+                flash('Announcement deleted.')
+            return redirect(url_for('admin', q=q_val))
+
+        target_user = User.query.filter_by(username=request.form.get('username', '').strip().lower()).first()
+        if not target_user:
+            flash('Target user not found.')
+            return redirect(url_for('admin', q=q_val))
+
+        if action in ['give', 'remove']:
+            badge_name = request.form.get('badge_name')
+            badge_info = next((b for b in BADGES_LIST if b['name'] == badge_name), None)
+            if badge_info:
                 if action == 'give':
                     existing = Badge.query.filter_by(user_id=target_user.id, name=badge_name).first()
                     if not existing:
-                        db.session.add(Badge(user_id=target_user.id, name=badge_name, icon=badge_info['icon']))
+                        db.session.add(Badge(user_id=target_user.id, name=badge_name, icon=badge_info['icon'], visible=True))
                 elif action == 'remove':
                     Badge.query.filter_by(user_id=target_user.id, name=badge_name).delete()
-                flash(f'Updated badges for {target_user.username}')
-            elif action == 'give_views':
-                amount = int(request.form.get('view_amount', 0))
-                if target_user.profile:
-                    target_user.profile.views += amount
-                    flash(f'Gave {amount} views to {target_user.username}')
+                db.session.commit()
+                flash(f'Updated badges for @{target_user.username}')
+
+        elif action == 'give_views':
+            amount = int(request.form.get('view_amount', 0))
+            if not target_user.profile:
+                target_user.profile = Profile(user_id=target_user.id, display_name=target_user.username)
+            target_user.profile.views = max(0, target_user.profile.views + amount)
             db.session.commit()
-        return redirect(url_for('admin', q=request.form.get('q', '')))
+            flash(f'Adjusted views by {amount} for @{target_user.username}')
+
+        elif action == 'ban':
+            if target_user.id == current_user.id:
+                flash('You cannot ban yourself.')
+            else:
+                target_user.is_banned = True
+                target_user.ban_reason = request.form.get('ban_reason', '').strip()[:256] or 'Banned by staff'
+                db.session.commit()
+                flash(f'Banned @{target_user.username}')
+
+        elif action == 'unban':
+            target_user.is_banned = False
+            target_user.ban_reason = ''
+            db.session.commit()
+            flash(f'Unbanned @{target_user.username}')
+
+        elif action == 'warn':
+            reason = request.form.get('warn_reason', '').strip()[:512]
+            if reason:
+                db.session.add(Warning(user_id=target_user.id, issued_by=current_user.username, reason=reason))
+                db.session.commit()
+                flash(f'Warned @{target_user.username}')
+            else:
+                flash('Please enter a warning reason.')
+
+        elif action == 'message':
+            msg_body = request.form.get('dm_body', '').strip()
+            if msg_body:
+                db.session.add(DirectMessage(sender_id=current_user.id, recipient_id=target_user.id, body=msg_body))
+                db.session.commit()
+                flash(f'Message sent to @{target_user.username}')
+            else:
+                flash('Message cannot be empty.')
+
+        elif action == 'impersonate':
+            if target_user.id == current_user.id:
+                flash('Already logged in as this user.')
+            else:
+                session['impersonator_id'] = current_user.id
+                login_user(target_user)
+                flash(f'Now logged in as @{target_user.username}')
+                return redirect('/dashboard')
+
+        return redirect(url_for('admin', q=q_val))
 
     query = request.args.get('q', '').strip().lower()
     users = User.query.filter(User.username.ilike(f'%{query}%')).all() if query else User.query.order_by(User.created.desc()).all()
     badge_options_html = ''.join(f'<option value="{b["name"]}">{b["name"]}</option>' for b in BADGES_LIST)
 
+    all_anns = Announcement.query.order_by(Announcement.created.desc()).all()
+    ann_rows = ''.join(
+        f"""<div class="row">
+            <span><b>{escape(a.title)}</b> — {escape(a.body)} <small style="opacity:0.65;">({'Active' if a.active else 'Hidden'})</small></span>
+            <div style="display:flex;gap:5px;">
+                <form method="post"><input type="hidden" name="action" value="toggle_announcement"><input type="hidden" name="ann_id" value="{a.id}"><button class="mini">{'Hide' if a.active else 'Show'}</button></form>
+                <form method="post"><input type="hidden" name="action" value="delete_announcement"><input type="hidden" name="ann_id" value="{a.id}"><button class="mini"><i class="fa-solid fa-trash"></i></button></form>
+            </div>
+        </div>"""
+        for a in all_anns
+    ) or '<p style="opacity:0.7;">No announcements yet.</p>'
+
     user_rows = ''
     for u in users:
         u_badges = ', '.join(b.name for b in u.badges) or 'None'
-        user_rows += f"""<div class="row" style="flex-direction: column; align-items: flex-start; gap: 0.5rem; padding: 1rem 0;">
-            <div style="display:flex; justify-content:space-between; width:100%;"><b style="font-size:1.1rem;">@{u.username}</b><span style="font-size: 0.9rem; color: #a1a1aa;">{escape(u.email)}</span></div>
-            <div style="font-size: 0.9rem; margin-bottom: 0.5rem; color:#8b5cf6;">Badges: {u_badges}</div>
-            <div style="display:flex; gap: 0.5rem; width:100%; flex-wrap: wrap; margin-top: 5px;">
+        status_tag = f'<span style="color:#ef4444;font-weight:700;">BANNED ({escape(u.ban_reason)})</span>' if u.is_banned else '<span style="color:#10b981;">Active</span>'
+        user_rows += f"""<div class="row" style="flex-direction: column; align-items: flex-start; gap: 0.65rem; padding: 1.1rem 0;">
+            <div style="display:flex; justify-content:space-between; width:100%; flex-wrap:wrap; gap:8px;">
+                <div><b style="font-size:1.1rem;">@{u.username}</b> <span style="margin-left:8px;font-size:0.85rem;">{status_tag}</span></div>
+                <span style="font-size: 0.9rem; color: #a1a1aa;">{escape(u.email)} • Warnings: {len(u.warnings)}</span>
+            </div>
+            <div style="font-size: 0.9rem; color:#8b5cf6;">Badges: {u_badges}</div>
+
+            <div style="display:flex; gap: 0.5rem; width:100%; flex-wrap: wrap;">
                 <form method="post" style="display:flex; gap:5px; align-items:center;">
                     <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
-                    <select name="badge_name" style="margin:0; padding:0.4rem;">{badge_options_html}</select>
+                    <select name="badge_name" style="margin:0; padding:0.4rem; width:auto;">{badge_options_html}</select>
                     <button name="action" value="give" class="btn" style="padding:0.4rem 0.8rem;">Give</button>
                     <button name="action" value="remove" class="mini" style="padding:0.4rem 0.8rem;">Remove</button>
                 </form>
+
                 <form method="post" style="display:flex; gap:5px; align-items:center;">
                     <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
                     <input type="hidden" name="action" value="give_views">
                     <input type="number" name="view_amount" placeholder="Views" style="width:90px; margin:0; padding:0.4rem;" required>
                     <button class="mini" style="padding:0.4rem 0.8rem;">+ Views</button>
                 </form>
+
+                <form method="post" style="display:flex; gap:5px; align-items:center;">
+                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
+                    <input type="hidden" name="action" value="impersonate">
+                    <button class="mini" style="padding:0.4rem 0.8rem;border-color:#fbbf24;color:#fbbf24;"><i class="fa-solid fa-right-to-bracket"></i> Login As</button>
+                </form>
+            </div>
+
+            <div style="display:flex; gap: 0.5rem; width:100%; flex-wrap: wrap;">
+                <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:240px;">
+                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
+                    <input name="ban_reason" placeholder="Ban reason..." style="margin:0; padding:0.4rem;">
+                    {% if False %}{% endif %}
+                    {'<button name="action" value="unban" class="btn" style="padding:0.4rem 0.8rem;background:#10b981;color:#000;">Unban</button>' if u.is_banned else '<button name="action" value="ban" class="mini" style="padding:0.4rem 0.8rem;border-color:#ef4444;color:#ef4444;">Ban</button>'}
+                </form>
+
+                <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:240px;">
+                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
+                    <input type="hidden" name="action" value="warn">
+                    <input name="warn_reason" placeholder="Warning reason..." style="margin:0; padding:0.4rem;" required>
+                    <button class="mini" style="padding:0.4rem 0.8rem;border-color:#f59e0b;color:#f59e0b;">Warn</button>
+                </form>
+
+                <form method="post" style="display:flex; gap:5px; align-items:center; flex:1; min-width:260px;">
+                    <input type="hidden" name="username" value="{u.username}"><input type="hidden" name="q" value="{escape(query)}">
+                    <input type="hidden" name="action" value="message">
+                    <input name="dm_body" placeholder="Send direct message..." style="margin:0; padding:0.4rem;" required>
+                    <button class="btn" style="padding:0.4rem 0.8rem;">Message</button>
+                </form>
             </div>
         </div>"""
 
-    return page(f"""<div class="card"><h2>Admin Panel</h2>
+    return page(f"""
+    <div class="card">
+        <h2><i class="fa-solid fa-bullhorn" style="color:#38bdf8;"></i> Host Global Announcement</h2>
+        <form method="post" class="grid-2" style="margin-top:0.75rem;">
+            <input type="hidden" name="action" value="create_announcement">
+            <input name="ann_title" placeholder="Announcement Title" required>
+            <input name="ann_body" placeholder="Announcement Message" required>
+        </form>
+        <form method="post" style="margin-top:0.5rem;">
+            <input type="hidden" name="action" value="create_announcement">
+            <div class="grid-2">
+                <input name="ann_title" placeholder="Title (e.g. Server Maintenance)" required>
+                <input name="ann_body" placeholder="Message shown to users..." required>
+            </div>
+            <button class="btn" style="margin-top:0.5rem;">Publish Announcement</button>
+        </form>
+        <div style="margin-top:1rem;">{ann_rows}</div>
+    </div>
+
+    <div class="card">
+        <h2><i class="fa-solid fa-shield-halved" style="color:#ff4b4b;"></i> Staff Admin Panel</h2>
         <form method="get" style="display:flex; gap:0.5rem; margin:1rem 0;">
             <input name="q" value="{escape(query)}" placeholder="Search username..." style="margin:0;">
             <button class="btn">Search</button>
@@ -675,160 +882,202 @@ PUBLIC_PROFILE_HTML = """
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ p.page_title or (p.display_name ~ ' | Dvora.lol') }}</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-<link rel="stylesheet" href="/static/style.css">
 <style>
-  :root { --accent: {{ p.accent }}; }
-  body { color: {{ p.text_color }}; }
-  .profile {
-    background: rgba(20, 20, 25, {{ p.card_opacity }});
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+    color: {{ p.text_color }};
+    background: {{ bg_style }};
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
+    overflow-x: hidden;
+  }
+  .profile-card {
+    width: 100%;
+    max-width: 520px;
+    border-radius: 22px;
+    overflow: hidden;
+    background: rgba(15, 15, 22, {{ p.card_opacity }});
     backdrop-filter: blur({{ p.card_blur }}px);
     -webkit-backdrop-filter: blur({{ p.card_blur }}px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.55);
+    {% if p.enable_animations %}
+    animation: fadeUp 0.6s ease-out;
+    {% endif %}
   }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(18px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .banner {
+    height: 145px;
+    width: 100%;
+    background: linear-gradient(135deg, {{ p.accent }}, #111827);
+    {% if p.banner %}
+    background-image: url('/uploads/{{ p.banner }}');
+    background-size: cover;
+    background-position: center;
+    {% endif %}
+  }
+  .card-inner { padding: 0 1.75rem 1.75rem; text-align: center; }
+  .avatar-wrap { margin-top: -54px; display: flex; justify-content: center; }
+  .avatar {
+    width: 108px; height: 108px; border-radius: 50%; object-fit: cover;
+    border: 4px solid {{ p.accent }};
+    background: #18181b;
+    box-shadow: 0 8px 25px rgba(0,0,0,0.45);
+  }
+  .display-name {
+    font-size: 1.65rem; font-weight: 800; margin-top: 0.75rem;
+    {% if p.enable_animations %}
+    background: linear-gradient(90deg, {{ p.text_color }}, {{ p.accent }}, {{ p.text_color }});
+    background-size: 200% auto;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: shine 4s linear infinite;
+    {% endif %}
+  }
+  @keyframes shine { to { background-position: 200% center; } }
+  .username { font-size: 0.9rem; opacity: 0.65; margin-top: 2px; }
+  .badges {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
+    margin-top: 0.85rem;
+  }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 600;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+  }
+  .badge i { color: {{ p.accent }}; }
+  .bio {
+    margin-top: 0.9rem; font-size: 0.95rem; line-height: 1.5; opacity: 0.9;
+    white-space: pre-line;
+  }
+  .discord-box {
+    margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 14px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex; align-items: center; justify-content: space-between; text-align: left;
+  }
+  .audio-player {
+    margin-top: 1rem; padding: 0.9rem 1rem; border-radius: 14px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    text-align: left;
+  }
+  .audio-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 0.55rem; font-size: 0.88rem; font-weight: 600;
+  }
+  .audio-player audio {
+    width: 100%;
+    height: 36px;
+    border-radius: 8px;
+  }
+  .links { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 1.15rem; }
+  .link-btn {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0.85rem 1.1rem; border-radius: 14px;
+    text-decoration: none; color: {{ p.text_color }}; font-weight: 600;
+    background: rgba(255, 255, 255, 0.07);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+  }
+  .link-btn:hover {
+    transform: translateY(-2px);
+    background: rgba(255, 255, 255, 0.13);
+    border-color: {{ p.accent }};
+  }
+  .footer-meta {
+    margin-top: 1.35rem; display: flex; justify-content: space-between; align-items: center;
+    font-size: 0.8rem; opacity: 0.65;
+  }
+  .footer-meta a { color: inherit; text-decoration: none; }
 </style>
 </head>
-<body class="theme-{{ p.theme }}">
-{% if p.background %}
-<div class="page-bg" style="background-image: url('/uploads/{{ p.background }}');"></div>
-{% endif %}
-
-{% if audio_src %}
-<button type="button" id="audioToggleBtn" class="audio-glow-btn playing" title="Toggle Audio" aria-label="Toggle Audio">
-  {% if p.audio_icon and p.audio_icon.startswith('fa-') %}
-    <i class="{{ p.audio_icon }}"></i>
-  {% elif p.audio_icon %}
-    <img src="/uploads/{{ p.audio_icon }}" alt="Audio Icon">
-  {% else %}
-    <i class="fa-solid fa-compact-disc"></i>
-  {% endif %}
-</button>
-<audio id="bgAudio" src="{{ audio_src }}" loop preload="auto" playsinline></audio>
-{% endif %}
-
-<div class="profile-container">
-  <div class="profile">
-    {% if p.banner %}
-      <div class="banner" style="background-image: url('/uploads/{{ p.banner }}');"></div>
-    {% else %}
-      <div class="banner" style="background: linear-gradient(135deg, {{ p.accent }}, transparent);"></div>
-    {% endif %}
-
-    {% if p.avatar %}
-      <img class="avatar" src="/uploads/{{ p.avatar }}" alt="{{ p.display_name }}">
-    {% else %}
-      <div class="avatar" style="margin: 0 auto 1rem; display:flex; align-items:center; justify-content:center; font-size:2rem; font-weight:800; color:{{ p.accent }};">
-        {{ user.username[0]|upper }}
+<body>
+  <div class="profile-card">
+    <div class="banner"></div>
+    <div class="card-inner">
+      <div class="avatar-wrap">
+        {% if p.avatar %}
+          <img class="avatar" src="/uploads/{{ p.avatar }}" alt="{{ p.display_name }}">
+        {% else %}
+          <div class="avatar" style="display:flex;align-items:center;justify-content:center;font-size:2.2rem;font-weight:800;color:{{ p.accent }};">
+            {{ user.username[0]|upper }}
+          </div>
+        {% endif %}
       </div>
-    {% endif %}
 
-    <h1 class="{% if p.enable_animations %}animated-name{% endif %}">{{ p.display_name or user.username }}</h1>
+      <h1 class="display-name">{{ p.display_name or user.username }}</h1>
+      <div class="username">@{{ user.username }}</div>
 
-    {% if badges %}
-    <div class="badges-container">
-      {% for b in badges %}
-        <span class="badge" data-name="{{ b.name }}"><i class="fa-solid {{ b.icon }}"></i></span>
-      {% endfor %}
-    </div>
-    {% endif %}
+      {% if badges %}
+      <div class="badges">
+        {% for b in badges %}
+          <span class="badge"><i class="fa-solid {{ b.icon }}"></i> {{ b.name }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
 
-    {% if p.bio %}
-      <p>{{ p.bio }}</p>
-    {% endif %}
+      {% if p.bio %}
+        <p class="bio">{{ p.bio }}</p>
+      {% endif %}
 
-    {% if p.discord_user %}
-    <div class="discord-widget">
-      <i class="fa-brands fa-discord" style="font-size:1.3rem;color:#5865F2;"></i>
-      <span><b>{{ p.discord_user }}</b> · {{ p.discord_status or 'Online' }}</span>
-    </div>
-    {% endif %}
+      {% if p.discord_user %}
+      <div class="discord-box">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <i class="fa-brands fa-discord" style="font-size:1.5rem;color:#5865F2;"></i>
+          <div>
+            <div style="font-weight:700;font-size:0.92rem;">{{ p.discord_user }}</div>
+            <div style="font-size:0.8rem;opacity:0.75;">{{ p.discord_status or 'Online' }}</div>
+          </div>
+        </div>
+        <span style="width:10px;height:10px;border-radius:50%;background:#10b981;display:inline-block;"></span>
+      </div>
+      {% endif %}
 
-    {% if visible_links %}
-    <div>
-      {% for l in visible_links %}
-      <a class="link" href="/go/{{ l.id }}" target="_blank" rel="noopener">
-        <span style="display:flex;align-items:center;gap:10px;">
-          {% if l.platform == 'website' %}
-            <i class="fa-solid fa-globe" style="width:20px;"></i>
-          {% else %}
-            <i class="fa-brands fa-{{ l.platform }}" style="width:20px;"></i>
-          {% endif %}
-          <span>{{ l.label or l.platform|capitalize }}</span>
-        </span>
-        <i class="fa-solid fa-chevron-right link-arrow" style="font-size:0.85rem;"></i>
-      </a>
-      {% endfor %}
-    </div>
-    {% endif %}
+      {% if audio_src %}
+      <div class="audio-player">
+        <div class="audio-header">
+          <span><i class="fa-solid fa-music" style="color:{{ p.accent }};margin-right:6px;"></i>{{ p.audio_title or 'Profile Audio' }}</span>
+          {% if audio_ext %}<span style="font-size:0.72rem;opacity:0.65;text-transform:uppercase;">{{ audio_ext }}</span>{% endif %}
+        </div>
+        <audio controls preload="metadata" src="{{ audio_src }}"></audio>
+      </div>
+      {% endif %}
 
-    <div style="margin-top:1.5rem;font-size:0.85rem;">
-      <span class="glow-text"><i class="fa-solid fa-eye"></i> {{ p.views }} views</span>
+      {% if visible_links %}
+      <div class="links">
+        {% for l in visible_links %}
+        <a class="link-btn" href="/go/{{ l.id }}" target="_blank" rel="noopener">
+          <span style="display:flex;align-items:center;gap:10px;">
+            {% if l.platform == 'website' %}
+              <i class="fa-solid fa-globe" style="color:{{ p.accent }};width:20px;"></i>
+            {% else %}
+              <i class="fa-brands fa-{{ l.platform }}" style="color:{{ p.accent }};width:20px;"></i>
+            {% endif %}
+            <span>{{ l.label or l.platform|capitalize }}</span>
+          </span>
+          <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:0.8rem;opacity:0.6;"></i>
+        </a>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <div class="footer-meta">
+        <span><i class="fa-solid fa-eye"></i> {{ p.views }} views</span>
+        <a href="/">Dvora.lol</a>
+      </div>
     </div>
   </div>
-</div>
-
-{% if audio_src %}
-<script>
-  (function() {
-    const audio = document.getElementById('bgAudio');
-    const btn = document.getElementById('audioToggleBtn');
-    if (!audio || !btn) return;
-
-    let userMuted = false;
-
-    function syncState() {
-      if (!audio.paused && !audio.muted) {
-        btn.classList.add('playing');
-        btn.classList.remove('muted');
-      } else {
-        btn.classList.remove('playing');
-        btn.classList.add('muted');
-      }
-    }
-
-    async function tryAutoplay() {
-      if (userMuted) return;
-      try {
-        audio.muted = false;
-        await audio.play();
-        syncState();
-      } catch (err) {
-        syncState();
-        const unlock = async () => {
-          if (userMuted) return;
-          try {
-            audio.muted = false;
-            await audio.play();
-          } catch (_) {}
-          syncState();
-          document.removeEventListener('click', unlock);
-          document.removeEventListener('keydown', unlock);
-          document.removeEventListener('touchstart', unlock);
-        };
-        document.addEventListener('click', unlock, { once: true });
-        document.addEventListener('keydown', unlock, { once: true });
-        document.addEventListener('touchstart', unlock, { once: true });
-      }
-    }
-
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      if (audio.paused) {
-        userMuted = false;
-        audio.muted = false;
-        try { await audio.play(); } catch (_) {}
-      } else {
-        userMuted = true;
-        audio.pause();
-      }
-      syncState();
-    });
-
-    audio.addEventListener('play', syncState);
-    audio.addEventListener('pause', syncState);
-    window.addEventListener('DOMContentLoaded', tryAutoplay);
-    tryAutoplay();
-  })();
-</script>
-{% endif %}
 </body>
 </html>
 """
@@ -837,11 +1086,32 @@ PUBLIC_PROFILE_HTML = """
 @app.route('/<username>')
 def public_profile(username):
     user = User.query.filter_by(username=username.lower()).first_or_404()
+    if user.is_banned:
+        abort(404)
     p = user.profile
+    if not p:
+        p = Profile(user_id=user.id, display_name=user.username, page_title=f'{user.username} | Dvora.lol')
+        db.session.add(p)
+        db.session.commit()
     p.views += 1
     db.session.commit()
 
-    audio_src = f"/uploads/{p.audio_file}" if p.audio_file else (p.music_url or '')
+    themes = {
+        'default': 'radial-gradient(circle at top, #1e1b4b, #09090b 70%)',
+        'midnight': 'radial-gradient(circle at top, #0f172a, #020617 70%)',
+        'crimson': 'radial-gradient(circle at top, #450a0a, #09090b 70%)',
+        'emerald': 'radial-gradient(circle at top, #064e3b, #09090b 70%)',
+    }
+    bg_style = f"url('/uploads/{p.background}')" if p.background else themes.get(p.theme, themes['default'])
+
+    audio_src = ''
+    audio_ext = ''
+    if p.audio_file:
+        audio_src = f"/uploads/{p.audio_file}"
+        audio_ext = p.audio_file.rsplit('.', 1)[-1].lower()
+    elif p.music_url:
+        audio_src = p.music_url
+
     visible_links = [l for l in user.links if l.visible]
     visible_badges = [b for b in user.badges if b.visible]
 
@@ -849,11 +1119,13 @@ def public_profile(username):
         PUBLIC_PROFILE_HTML,
         user=user,
         p=p,
+        bg_style=bg_style,
         audio_src=audio_src,
+        audio_ext=audio_ext,
         visible_links=visible_links,
         badges=visible_badges,
     )
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False)
