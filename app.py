@@ -129,7 +129,7 @@ class Profile(db.Model):
     background = db.Column(db.String(128), default='')
     music_url = db.Column(db.String(512), default='')
     audio_file = db.Column(db.String(128), default='')
-    audio_title = db.Column(db.String(128), default='')
+    audio_icon = db.Column(db.String(128), default='')
     discord_user = db.Column(db.String(64), default='')
     discord_status = db.Column(db.String(128), default='Online')
     accent = db.Column(db.String(7), default='#8b5cf6')
@@ -190,7 +190,7 @@ def save_upload(file, allowed_set=ALLOWED):
 
 
 def delete_upload(fname):
-    if fname:
+    if fname and not fname.startswith('fa-'):
         path = os.path.join(app.config['UPLOAD_FOLDER'], fname)
         if os.path.exists(path):
             os.remove(path)
@@ -349,7 +349,6 @@ def edit_profile():
         p.display_name = request.form.get('display_name', '')[:64]
         p.bio = request.form.get('bio', '')[:500]
         p.music_url = request.form.get('music_url', '')[:512]
-        p.audio_title = request.form.get('audio_title', '')[:128]
         p.discord_user = request.form.get('discord_user', '')[:64]
         p.discord_status = request.form.get('discord_status', '')[:128]
         p.page_title = request.form.get('page_title', '')[:128]
@@ -358,11 +357,16 @@ def edit_profile():
             delete_upload(p.audio_file)
             p.audio_file = ''
 
+        if request.form.get('reset_audio_icon'):
+            delete_upload(p.audio_icon)
+            p.audio_icon = ''
+
         a = save_upload(request.files.get('avatar'), IMAGE_EXTS)
         b = save_upload(request.files.get('banner'), IMAGE_EXTS)
         bg = save_upload(request.files.get('background'), IMAGE_EXTS)
-        audio_upload = request.files.get('audio')
-        au = save_upload(audio_upload, AUDIO_EXTS)
+        au = save_upload(request.files.get('audio'), AUDIO_EXTS)
+        icon_img = save_upload(request.files.get('audio_icon_file'), IMAGE_EXTS)
+        icon_fa = request.form.get('audio_icon_fa', '').strip()[:64]
 
         if a:
             delete_upload(p.avatar)
@@ -376,24 +380,35 @@ def edit_profile():
         if au:
             delete_upload(p.audio_file)
             p.audio_file = au
-            if not p.audio_title and audio_upload and audio_upload.filename:
-                p.audio_title = os.path.splitext(audio_upload.filename)[0][:128]
+        if icon_img:
+            delete_upload(p.audio_icon)
+            p.audio_icon = icon_img
+        elif icon_fa:
+            delete_upload(p.audio_icon)
+            p.audio_icon = icon_fa if icon_fa.startswith('fa-') else f'fa-{icon_fa}'
 
         db.session.commit()
         flash('Profile saved successfully!')
         return redirect('/dashboard/profile')
 
-    current_audio_html = ''
+    audio_status_html = ''
     if p.audio_file:
-        label = escape(p.audio_title or p.audio_file)
-        current_audio_html = f"""
-        <div style="margin:0.75rem 0;padding:0.85rem;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);">
-            <div style="font-size:0.9rem;margin-bottom:0.5rem;"><i class="fa-solid fa-music" style="color:#8b5cf6;"></i> Current Audio: <b>{label}</b></div>
-            <audio controls preload="metadata" src="/uploads/{p.audio_file}" style="width:100%;"></audio>
-            <label style="display:flex;align-items:center;gap:8px;margin-top:0.5rem;font-size:0.85rem;cursor:pointer;">
-                <input type="checkbox" name="remove_audio" value="1" style="width:auto;margin:0;"> Remove uploaded audio
+        audio_status_html = f"""
+        <div style="margin:0.5rem 0 0.9rem;padding:0.75rem 1rem;border-radius:10px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.5rem;">
+            <span style="font-size:0.88rem;"><i class="fa-solid fa-music" style="color:#8b5cf6;"></i> Uploaded: <b>{escape(p.audio_file)}</b></span>
+            <label style="display:inline-flex;align-items:center;gap:6px;margin:0;font-size:0.85rem;cursor:pointer;">
+                <input type="checkbox" name="remove_audio" value="1" style="width:auto;margin:0;"> Remove audio
             </label>
         </div>"""
+
+    icon_status_html = ''
+    if p.audio_icon:
+        icon_status_html = f"""
+        <label style="display:inline-flex;align-items:center;gap:6px;margin-top:0.35rem;font-size:0.82rem;cursor:pointer;">
+            <input type="checkbox" name="reset_audio_icon" value="1" style="width:auto;margin:0;"> Reset custom icon ({escape(p.audio_icon)})
+        </label>"""
+
+    fa_val = p.audio_icon if p.audio_icon.startswith('fa-') else ''
 
     return dash(f"""<form method="post" enctype="multipart/form-data" class="card"><h2>Edit Profile</h2>
 <div class="grid-2"><label>Display name<input name="display_name" value="{escape(p.display_name)}"></label>
@@ -402,15 +417,19 @@ def edit_profile():
 <div class="grid-2"><label>Discord User<input name="discord_user" value="{escape(p.discord_user)}" placeholder="e.g. dvora"></label>
 <label>Discord Status<input name="discord_status" value="{escape(p.discord_status)}"></label></div>
 <div class="grid-2">
-  <label>Upload Audio (MP3, WAV, MP4)<input type="file" name="audio" accept=".mp3,.wav,.mp4,audio/mpeg,audio/wav,video/mp4"></label>
-  <label>Audio Track Title<input name="audio_title" value="{escape(p.audio_title)}" placeholder="e.g. Midnight Vibes"></label>
+  <label>Audio File (MP3, WAV, MP4)<input type="file" name="audio" accept=".mp3,.wav,.mp4,audio/mpeg,audio/wav,video/mp4"></label>
+  <label>Or Direct Audio URL<input name="music_url" value="{escape(p.music_url)}" placeholder="https://..."></label>
 </div>
-{current_audio_html}
-<label>Or External Music URL (MP3/WAV)<input name="music_url" value="{escape(p.music_url)}" placeholder="https://..."></label>
+{audio_status_html}
+<div class="grid-2">
+  <label>Custom Icon Image<input type="file" name="audio_icon_file" accept="image/*"></label>
+  <label>Or Icon Class (e.g. fa-headphones, fa-compact-disc)<input name="audio_icon_fa" value="{escape(fa_val)}" placeholder="fa-compact-disc"></label>
+</div>
+{icon_status_html}
 <div class="grid-2"><label>Avatar<input type="file" name="avatar" accept="image/*"></label>
 <label>Banner<input type="file" name="banner" accept="image/*"></label></div>
 <label>Custom Background Image<input type="file" name="background" accept="image/*"></label>
-<button class="btn"><i class="fa-solid fa-floppy-disk"></i> Save Changes</button></form>""", 'profile')
+<button class="btn" style="margin-top:0.75rem;"><i class="fa-solid fa-floppy-disk"></i> Save Changes</button></form>""", 'profile')
 
 
 @app.route('/dashboard/links', methods=['GET', 'POST'])
@@ -656,202 +675,160 @@ PUBLIC_PROFILE_HTML = """
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ p.page_title or (p.display_name ~ ' | Dvora.lol') }}</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<link rel="stylesheet" href="/static/style.css">
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
-  body {
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2rem 1rem;
-    color: {{ p.text_color }};
-    background: {{ bg_style }};
-    background-size: cover;
-    background-position: center;
-    background-attachment: fixed;
-    overflow-x: hidden;
-  }
-  .profile-card {
-    width: 100%;
-    max-width: 520px;
-    border-radius: 22px;
-    overflow: hidden;
-    background: rgba(15, 15, 22, {{ p.card_opacity }});
+  :root { --accent: {{ p.accent }}; }
+  body { color: {{ p.text_color }}; }
+  .profile {
+    background: rgba(20, 20, 25, {{ p.card_opacity }});
     backdrop-filter: blur({{ p.card_blur }}px);
     -webkit-backdrop-filter: blur({{ p.card_blur }}px);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.55);
-    {% if p.enable_animations %}
-    animation: fadeUp 0.6s ease-out;
-    {% endif %}
   }
-  @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(18px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  .banner {
-    height: 145px;
-    width: 100%;
-    background: linear-gradient(135deg, {{ p.accent }}, #111827);
-    {% if p.banner %}
-    background-image: url('/uploads/{{ p.banner }}');
-    background-size: cover;
-    background-position: center;
-    {% endif %}
-  }
-  .card-inner { padding: 0 1.75rem 1.75rem; text-align: center; }
-  .avatar-wrap { margin-top: -54px; display: flex; justify-content: center; }
-  .avatar {
-    width: 108px; height: 108px; border-radius: 50%; object-fit: cover;
-    border: 4px solid {{ p.accent }};
-    background: #18181b;
-    box-shadow: 0 8px 25px rgba(0,0,0,0.45);
-  }
-  .display-name {
-    font-size: 1.65rem; font-weight: 800; margin-top: 0.75rem;
-    {% if p.enable_animations %}
-    background: linear-gradient(90deg, {{ p.text_color }}, {{ p.accent }}, {{ p.text_color }});
-    background-size: 200% auto;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    animation: shine 4s linear infinite;
-    {% endif %}
-  }
-  @keyframes shine { to { background-position: 200% center; } }
-  .username { font-size: 0.9rem; opacity: 0.65; margin-top: 2px; }
-  .badges {
-    display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
-    margin-top: 0.85rem;
-  }
-  .badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 4px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 600;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-  }
-  .badge i { color: {{ p.accent }}; }
-  .bio {
-    margin-top: 0.9rem; font-size: 0.95rem; line-height: 1.5; opacity: 0.9;
-    white-space: pre-line;
-  }
-  .discord-box {
-    margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 14px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    display: flex; align-items: center; justify-content: space-between; text-align: left;
-  }
-  .audio-player {
-    margin-top: 1rem; padding: 0.9rem 1rem; border-radius: 14px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    text-align: left;
-  }
-  .audio-header {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 0.55rem; font-size: 0.88rem; font-weight: 600;
-  }
-  .audio-player audio {
-    width: 100%;
-    height: 36px;
-    border-radius: 8px;
-  }
-  .links { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 1.15rem; }
-  .link-btn {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 0.85rem 1.1rem; border-radius: 14px;
-    text-decoration: none; color: {{ p.text_color }}; font-weight: 600;
-    background: rgba(255, 255, 255, 0.07);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
-  }
-  .link-btn:hover {
-    transform: translateY(-2px);
-    background: rgba(255, 255, 255, 0.13);
-    border-color: {{ p.accent }};
-  }
-  .footer-meta {
-    margin-top: 1.35rem; display: flex; justify-content: space-between; align-items: center;
-    font-size: 0.8rem; opacity: 0.65;
-  }
-  .footer-meta a { color: inherit; text-decoration: none; }
 </style>
 </head>
-<body>
-  <div class="profile-card">
-    <div class="banner"></div>
-    <div class="card-inner">
-      <div class="avatar-wrap">
-        {% if p.avatar %}
-          <img class="avatar" src="/uploads/{{ p.avatar }}" alt="{{ p.display_name }}">
-        {% else %}
-          <div class="avatar" style="display:flex;align-items:center;justify-content:center;font-size:2.2rem;font-weight:800;color:{{ p.accent }};">
-            {{ user.username[0]|upper }}
-          </div>
-        {% endif %}
+<body class="theme-{{ p.theme }}">
+{% if p.background %}
+<div class="page-bg" style="background-image: url('/uploads/{{ p.background }}');"></div>
+{% endif %}
+
+{% if audio_src %}
+<button type="button" id="audioToggleBtn" class="audio-glow-btn playing" title="Toggle Audio" aria-label="Toggle Audio">
+  {% if p.audio_icon and p.audio_icon.startswith('fa-') %}
+    <i class="{{ p.audio_icon }}"></i>
+  {% elif p.audio_icon %}
+    <img src="/uploads/{{ p.audio_icon }}" alt="Audio Icon">
+  {% else %}
+    <i class="fa-solid fa-compact-disc"></i>
+  {% endif %}
+</button>
+<audio id="bgAudio" src="{{ audio_src }}" loop preload="auto" playsinline></audio>
+{% endif %}
+
+<div class="profile-container">
+  <div class="profile">
+    {% if p.banner %}
+      <div class="banner" style="background-image: url('/uploads/{{ p.banner }}');"></div>
+    {% else %}
+      <div class="banner" style="background: linear-gradient(135deg, {{ p.accent }}, transparent);"></div>
+    {% endif %}
+
+    {% if p.avatar %}
+      <img class="avatar" src="/uploads/{{ p.avatar }}" alt="{{ p.display_name }}">
+    {% else %}
+      <div class="avatar" style="margin: 0 auto 1rem; display:flex; align-items:center; justify-content:center; font-size:2rem; font-weight:800; color:{{ p.accent }};">
+        {{ user.username[0]|upper }}
       </div>
+    {% endif %}
 
-      <h1 class="display-name">{{ p.display_name or user.username }}</h1>
-      <div class="username">@{{ user.username }}</div>
+    <h1 class="{% if p.enable_animations %}animated-name{% endif %}">{{ p.display_name or user.username }}</h1>
 
-      {% if badges %}
-      <div class="badges">
-        {% for b in badges %}
-          <span class="badge"><i class="fa-solid {{ b.icon }}"></i> {{ b.name }}</span>
-        {% endfor %}
-      </div>
-      {% endif %}
+    {% if badges %}
+    <div class="badges-container">
+      {% for b in badges %}
+        <span class="badge" data-name="{{ b.name }}"><i class="fa-solid {{ b.icon }}"></i></span>
+      {% endfor %}
+    </div>
+    {% endif %}
 
-      {% if p.bio %}
-        <p class="bio">{{ p.bio }}</p>
-      {% endif %}
+    {% if p.bio %}
+      <p>{{ p.bio }}</p>
+    {% endif %}
 
-      {% if p.discord_user %}
-      <div class="discord-box">
-        <div style="display:flex;align-items:center;gap:10px;">
-          <i class="fa-brands fa-discord" style="font-size:1.5rem;color:#5865F2;"></i>
-          <div>
-            <div style="font-weight:700;font-size:0.92rem;">{{ p.discord_user }}</div>
-            <div style="font-size:0.8rem;opacity:0.75;">{{ p.discord_status or 'Online' }}</div>
-          </div>
-        </div>
-        <span style="width:10px;height:10px;border-radius:50%;background:#10b981;display:inline-block;"></span>
-      </div>
-      {% endif %}
+    {% if p.discord_user %}
+    <div class="discord-widget">
+      <i class="fa-brands fa-discord" style="font-size:1.3rem;color:#5865F2;"></i>
+      <span><b>{{ p.discord_user }}</b> · {{ p.discord_status or 'Online' }}</span>
+    </div>
+    {% endif %}
 
-      {% if audio_src %}
-      <div class="audio-player">
-        <div class="audio-header">
-          <span><i class="fa-solid fa-music" style="color:{{ p.accent }};margin-right:6px;"></i>{{ p.audio_title or 'Profile Audio' }}</span>
-          {% if audio_ext %}<span style="font-size:0.72rem;opacity:0.65;text-transform:uppercase;">{{ audio_ext }}</span>{% endif %}
-        </div>
-        <audio controls preload="metadata" src="{{ audio_src }}"></audio>
-      </div>
-      {% endif %}
+    {% if visible_links %}
+    <div>
+      {% for l in visible_links %}
+      <a class="link" href="/go/{{ l.id }}" target="_blank" rel="noopener">
+        <span style="display:flex;align-items:center;gap:10px;">
+          {% if l.platform == 'website' %}
+            <i class="fa-solid fa-globe" style="width:20px;"></i>
+          {% else %}
+            <i class="fa-brands fa-{{ l.platform }}" style="width:20px;"></i>
+          {% endif %}
+          <span>{{ l.label or l.platform|capitalize }}</span>
+        </span>
+        <i class="fa-solid fa-chevron-right link-arrow" style="font-size:0.85rem;"></i>
+      </a>
+      {% endfor %}
+    </div>
+    {% endif %}
 
-      {% if visible_links %}
-      <div class="links">
-        {% for l in visible_links %}
-        <a class="link-btn" href="/go/{{ l.id }}" target="_blank" rel="noopener">
-          <span style="display:flex;align-items:center;gap:10px;">
-            {% if l.platform == 'website' %}
-              <i class="fa-solid fa-globe" style="color:{{ p.accent }};width:20px;"></i>
-            {% else %}
-              <i class="fa-brands fa-{{ l.platform }}" style="color:{{ p.accent }};width:20px;"></i>
-            {% endif %}
-            <span>{{ l.label or l.platform|capitalize }}</span>
-          </span>
-          <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:0.8rem;opacity:0.6;"></i>
-        </a>
-        {% endfor %}
-      </div>
-      {% endif %}
-
-      <div class="footer-meta">
-        <span><i class="fa-solid fa-eye"></i> {{ p.views }} views</span>
-        <a href="/">Dvora.lol</a>
-      </div>
+    <div style="margin-top:1.5rem;font-size:0.85rem;">
+      <span class="glow-text"><i class="fa-solid fa-eye"></i> {{ p.views }} views</span>
     </div>
   </div>
+</div>
+
+{% if audio_src %}
+<script>
+  (function() {
+    const audio = document.getElementById('bgAudio');
+    const btn = document.getElementById('audioToggleBtn');
+    if (!audio || !btn) return;
+
+    let userMuted = false;
+
+    function syncState() {
+      if (!audio.paused && !audio.muted) {
+        btn.classList.add('playing');
+        btn.classList.remove('muted');
+      } else {
+        btn.classList.remove('playing');
+        btn.classList.add('muted');
+      }
+    }
+
+    async function tryAutoplay() {
+      if (userMuted) return;
+      try {
+        audio.muted = false;
+        await audio.play();
+        syncState();
+      } catch (err) {
+        syncState();
+        const unlock = async () => {
+          if (userMuted) return;
+          try {
+            audio.muted = false;
+            await audio.play();
+          } catch (_) {}
+          syncState();
+          document.removeEventListener('click', unlock);
+          document.removeEventListener('keydown', unlock);
+          document.removeEventListener('touchstart', unlock);
+        };
+        document.addEventListener('click', unlock, { once: true });
+        document.addEventListener('keydown', unlock, { once: true });
+        document.addEventListener('touchstart', unlock, { once: true });
+      }
+    }
+
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (audio.paused) {
+        userMuted = false;
+        audio.muted = false;
+        try { await audio.play(); } catch (_) {}
+      } else {
+        userMuted = true;
+        audio.pause();
+      }
+      syncState();
+    });
+
+    audio.addEventListener('play', syncState);
+    audio.addEventListener('pause', syncState);
+    window.addEventListener('DOMContentLoaded', tryAutoplay);
+    tryAutoplay();
+  })();
+</script>
+{% endif %}
 </body>
 </html>
 """
@@ -864,22 +841,7 @@ def public_profile(username):
     p.views += 1
     db.session.commit()
 
-    themes = {
-        'default': 'radial-gradient(circle at top, #1e1b4b, #09090b 70%)',
-        'midnight': 'radial-gradient(circle at top, #0f172a, #020617 70%)',
-        'crimson': 'radial-gradient(circle at top, #450a0a, #09090b 70%)',
-        'emerald': 'radial-gradient(circle at top, #064e3b, #09090b 70%)',
-    }
-    bg_style = f"url('/uploads/{p.background}')" if p.background else themes.get(p.theme, themes['default'])
-
-    audio_src = ''
-    audio_ext = ''
-    if p.audio_file:
-        audio_src = f"/uploads/{p.audio_file}"
-        audio_ext = p.audio_file.rsplit('.', 1)[-1].lower()
-    elif p.music_url:
-        audio_src = p.music_url
-
+    audio_src = f"/uploads/{p.audio_file}" if p.audio_file else (p.music_url or '')
     visible_links = [l for l in user.links if l.visible]
     visible_badges = [b for b in user.badges if b.visible]
 
@@ -887,9 +849,7 @@ def public_profile(username):
         PUBLIC_PROFILE_HTML,
         user=user,
         p=p,
-        bg_style=bg_style,
         audio_src=audio_src,
-        audio_ext=audio_ext,
         visible_links=visible_links,
         badges=visible_badges,
     )
