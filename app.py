@@ -1,5 +1,6 @@
 import os
 import secrets
+import tempfile
 from datetime import datetime, date
 from flask import Flask, render_template_string, request, redirect, url_for, flash, send_from_directory, abort, session
 from flask_sqlalchemy import SQLAlchemy
@@ -9,7 +10,21 @@ from markupsafe import escape
 from sqlalchemy import inspect, text
 
 app = Flask(__name__, static_folder='.', static_url_path='/static')
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or 'dvora-lol-persistent-secret-key-2026'
+
+DATA_DIR = os.environ.get('DATA_DIR', '').strip()
+if not DATA_DIR:
+    candidate_instance = app.instance_path
+    try:
+        os.makedirs(candidate_instance, exist_ok=True)
+        test_file = os.path.join(candidate_instance, '.write_test')
+        with open(test_file, 'w') as f:
+            f.write('ok')
+        os.remove(test_file)
+        DATA_DIR = candidate_instance
+    except OSError:
+        DATA_DIR = os.path.join(tempfile.gettempdir(), 'dvora_data')
+        os.makedirs(DATA_DIR, exist_ok=True)
 
 database_url = os.environ.get('DATABASE_URL', '').strip()
 if database_url.startswith('postgres://'):
@@ -18,13 +33,15 @@ if database_url.startswith('postgres://'):
 if database_url:
     app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 else:
-    os.makedirs(app.instance_path, exist_ok=True)
-    db_path = os.path.join(app.instance_path, 'dvora.db')
+    db_path = os.path.join(DATA_DIR, 'dvora.db')
     app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER') or os.path.join(app.root_path, 'uploads')
+upload_folder = os.environ.get('UPLOAD_FOLDER', '').strip()
+if not upload_folder:
+    upload_folder = os.path.join(DATA_DIR, 'uploads')
+app.config['UPLOAD_FOLDER'] = upload_folder
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -38,7 +55,6 @@ ALLOWED = IMAGE_EXTS | AUDIO_EXTS
 
 ADMIN_BADGES = {'Developer', 'Owner', 'Moderator', 'Admin', 'Staff'}
 
-# --- 150+ BADGES DICTIONARY ---
 BADGES_LIST = [
     {'name': 'Developer', 'icon': 'fa-code'}, {'name': 'Staff', 'icon': 'fa-shield-halved'},
     {'name': 'Content Creator', 'icon': 'fa-video'}, {'name': 'Verified', 'icon': 'fa-circle-check'},
@@ -130,7 +146,6 @@ BADGE_SHOP_ITEMS = [
 ]
 
 
-# --- DATABASE MODELS ---
 class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(32), unique=True, nullable=False, index=True)
@@ -171,7 +186,7 @@ class Profile(db.Model):
     discord_status = db.Column(db.String(128), default='Online')
     accent = db.Column(db.String(7), default='#8b5cf6')
     text_color = db.Column(db.String(7), default='#ffffff')
-    card_opacity = db.Column(db.Float, default=0.4)
+    card_opacity = db.Column(db.Float, default=0.55)
     card_blur = db.Column(db.Integer, default=25)
     enable_animations = db.Column(db.Boolean, default=True)
     theme = db.Column(db.String(32), default='default')
@@ -276,6 +291,37 @@ def adjust_credits(user, delta, reason):
     db.session.add(CreditLog(user_id=user.id, delta=int(delta), reason=reason[:256]))
 
 
+def ensure_seed_data():
+    if not User.query.filter_by(username='dvora').first():
+        seed_pw = os.environ.get('DVORA_ADMIN_PASSWORD') or 'dvora123'
+        admin_user = User(
+            username='dvora',
+            email='dvora@dvora.lol',
+            password_hash=generate_password_hash(seed_pw),
+            credits=5000,
+        )
+        admin_user.profile = Profile(
+            display_name='dvora',
+            bio='Lead Of The Developer Team.',
+            discord_user='dv0ra',
+            discord_status='Online',
+            accent='#8b5cf6',
+            text_color='#ffffff',
+            card_opacity=0.65,
+            card_blur=25,
+            enable_animations=True,
+            theme='default',
+            page_title='dvora | Dvora.lol',
+        )
+        db.session.add(admin_user)
+        db.session.flush()
+        starter_badges = ['Developer', 'Staff', 'Verified', 'Premium', 'OG', 'Bug Hunter', 'Donor', 'Booster', 'Early Supporter']
+        icon_map = {b['name']: b['icon'] for b in BADGES_LIST}
+        for bname in starter_badges:
+            db.session.add(Badge(user_id=admin_user.id, name=bname, icon=icon_map.get(bname, 'fa-star'), visible=True))
+        db.session.commit()
+
+
 def run_auto_migrations():
     db.create_all()
     insp = inspect(db.engine)
@@ -302,10 +348,10 @@ def run_auto_migrations():
         'site_name': 'Dvora.lol',
         'maintenance_mode': '0',
         'registrations_open': '1',
-        'signup_bonus_credits': '75',
-        'daily_claim_credits': '25',
-        'social_discord': 'link',
-        'social_twitter': 'https://x.com/dvoralol',
+        'signup_bonus_credits': '100',
+        'daily_claim_credits': '50',
+        'social_discord': '',
+        'social_twitter': '',
         'social_youtube': '',
         'social_tiktok': '',
         'social_github': '',
@@ -326,6 +372,8 @@ def run_auto_migrations():
     if changed:
         db.session.commit()
 
+    ensure_seed_data()
+
 
 with app.app_context():
     run_auto_migrations()
@@ -336,7 +384,7 @@ def load_user(uid):
     user = db.session.get(User, int(uid))
     if user:
         if user.credits is None:
-            user.credits = 15
+            user.credits = 100
         if not user.profile:
             user.profile = Profile(display_name=user.username, page_title=f'{user.username} | {get_setting("site_name", "Dvora.lol")}')
         db.session.commit()
@@ -397,15 +445,7 @@ def render_audio_players(profile):
     <div class="audio-controls-wrap" id="dvora-audio-player">
         <audio id="profileAudio" src="{safe_src}" loop preload="metadata"></audio>
 
-        <!-- Compact Volume Pill -->
-        <div class="vol-pill" title="Volume">
-            <button type="button" class="vol-pill-btn" id="dvora-mute-btn" aria-label="Toggle Mute">
-                <i class="fa-solid fa-volume-high" id="dvora-vol-icon"></i>
-            </button>
-            <input type="range" class="vol-slider" id="dvora-vol-slider" min="0" max="100" value="80" style="--vol:80%;" aria-label="Volume">
-        </div>
-
-        <!-- Media Bar -->
+        <!-- Media Bar (Top) -->
         <div class="media-bar">
             {art_html}
             <div class="media-info">
@@ -427,6 +467,14 @@ def render_audio_players(profile):
                     <i class="fa-solid fa-forward-step"></i>
                 </button>
             </div>
+        </div>
+
+        <!-- Volume Meter (Below Sound / Media Bar) -->
+        <div class="vol-pill" title="Volume">
+            <button type="button" class="vol-pill-btn" id="dvora-mute-btn" aria-label="Toggle Mute">
+                <i class="fa-solid fa-volume-high" id="dvora-vol-icon"></i>
+            </button>
+            <input type="range" class="vol-slider" id="dvora-vol-slider" min="0" max="100" value="80" style="--vol:80%;" aria-label="Volume">
         </div>
     </div>
     <script>
@@ -565,7 +613,6 @@ def check_maintenance_and_ban():
                 </div>""", 'Maintenance')
 
 
-# --- BASE HTML WITH PARTICLES ---
 BASE = """
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ title or site_name }}</title>
@@ -1139,7 +1186,7 @@ def appearance():
     if request.method == 'POST':
         p.accent = request.form.get('accent', '#8b5cf6')[:7]
         p.text_color = request.form.get('text_color', '#ffffff')[:7]
-        p.card_opacity = float(request.form.get('card_opacity', 0.4))
+        p.card_opacity = float(request.form.get('card_opacity', 0.55))
         p.card_blur = int(request.form.get('card_blur', 25))
         p.theme = request.form.get('theme', 'default')
         p.enable_animations = 'enable_animations' in request.form
@@ -1205,7 +1252,6 @@ def track_link(link_id):
     return redirect(link.url)
 
 
-# --- MASSIVE STAFF ADMIN PANEL WITH TABS ---
 @app.route('/admin', methods=['GET', 'POST'])
 @login_required
 def admin():
@@ -1218,7 +1264,6 @@ def admin():
     if request.method == 'POST':
         action = request.form.get('action')
 
-        # --- ANNOUNCEMENTS TAB ACTIONS ---
         if action == 'create_announcement':
             title = request.form.get('ann_title', '').strip()[:128]
             body = request.form.get('ann_body', '').strip()
@@ -1249,7 +1294,6 @@ def admin():
                 flash('Announcement deleted.')
             return redirect(url_for('admin', tab='announcements'))
 
-        # --- SOCIALS TAB ACTIONS ---
         if action == 'save_socials':
             for k in ['social_discord', 'social_twitter', 'social_youtube', 'social_tiktok', 'social_github', 'social_instagram']:
                 set_setting(k, request.form.get(k, '').strip()[:512])
@@ -1258,7 +1302,6 @@ def admin():
             flash('Official site socials updated!')
             return redirect(url_for('admin', tab='socials'))
 
-        # --- CREDITS TAB ACTIONS ---
         if action == 'save_credits_page':
             set_setting('credits_text', request.form.get('credits_text', '').strip())
             set_setting('credits_team', request.form.get('credits_team', '').strip())
@@ -1301,7 +1344,6 @@ def admin():
                 flash(f'Sent {amount:+d} credits to all {len(all_u)} users!')
             return redirect(url_for('admin', tab='credits'))
 
-        # --- LINKS MODERATION TAB ACTIONS ---
         if action == 'admin_delete_link':
             lnk = db.session.get(Link, int(request.form.get('link_id', 0)))
             if lnk:
@@ -1321,7 +1363,6 @@ def admin():
                 flash('Link visibility updated.')
             return redirect(url_for('admin', tab='links', q=q_val))
 
-        # --- SYSTEM SETTINGS TAB ACTIONS ---
         if action == 'save_system':
             set_setting('site_name', request.form.get('site_name', 'Dvora.lol').strip()[:64] or 'Dvora.lol')
             set_setting('maintenance_mode', '1' if 'maintenance_mode' in request.form else '0')
@@ -1338,7 +1379,6 @@ def admin():
             flash('Audit log cleared.')
             return redirect(url_for('admin', tab='logs'))
 
-        # --- USER MANAGEMENT TAB ACTIONS ---
         target_user = User.query.filter_by(username=request.form.get('username', '').strip().lower()).first()
         if not target_user:
             flash('Target user not found.')
@@ -1443,7 +1483,6 @@ def admin():
 
         return redirect(url_for('admin', tab='users', q=q_val))
 
-    # --- ADMIN SIDEBAR NAVIGATION ---
     admin_tabs = [
         ('overview', 'Overview', 'fa-gauge-high'),
         ('users', 'Users & Moderation', 'fa-users'),
@@ -1459,7 +1498,6 @@ def admin():
         for k, label, icon in admin_tabs
     )
 
-    # --- RENDER SELECTED ADMIN TAB ---
     if tab == 'overview':
         total_users = User.query.count()
         banned_users = User.query.filter_by(is_banned=True).count()
@@ -1646,7 +1684,7 @@ def admin():
             {log_rows}
         </div>"""
 
-    else:  # 'users' tab
+    else:
         ql = q_val.lower()
         users = User.query.filter(User.username.ilike(f'%{ql}%')).all() if ql else User.query.order_by(User.created.desc()).all()
         badge_options_html = ''.join(f'<option value="{b["name"]}">{b["name"]}</option>' for b in BADGES_LIST)
@@ -1746,7 +1784,6 @@ def admin():
     </div>""", 'Admin Panel')
 
 
-# --- PUBLIC PROFILE PAGE ---
 PUBLIC_PROFILE_HTML = """
 <!doctype html>
 <html>
@@ -1758,17 +1795,22 @@ PUBLIC_PROFILE_HTML = """
 <link rel="stylesheet" href="/static/style.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
-  body {
+  html, body {
     min-height: 100vh;
+    width: 100%;
+    background-color: #09090b;
+    background-image: {{ bg_style }};
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+  }
+  body {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 2rem 1rem;
+    padding: 2.5rem 1.25rem;
     color: {{ p.text_color }};
-    background: {{ bg_style }};
-    background-size: cover;
-    background-position: center;
-    background-attachment: fixed;
     overflow-x: hidden;
   }
   .enter-overlay {
@@ -1791,33 +1833,33 @@ PUBLIC_PROFILE_HTML = """
   }
   .enter-box {
     text-align: center;
-    padding: 2rem;
-    border-radius: 20px;
-    background: rgba(255, 255, 255, 0.04);
+    padding: 2.25rem;
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.14);
-    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65);
   }
   .enter-title {
-    font-size: 1.5rem;
+    font-size: 1.6rem;
     font-weight: 800;
     letter-spacing: 0.4px;
     color: #ffffff;
   }
   .enter-sub {
-    margin-top: 0.45rem;
-    font-size: 0.88rem;
+    margin-top: 0.5rem;
+    font-size: 0.92rem;
     color: #a1a1aa;
   }
   .profile-card {
     width: 100%;
-    max-width: 520px;
-    border-radius: 22px;
+    max-width: 680px;
+    border-radius: 26px;
     overflow: hidden;
-    background: rgba(15, 15, 22, {{ p.card_opacity }});
+    background: rgba(18, 18, 22, {{ p.card_opacity }});
     backdrop-filter: blur({{ p.card_blur }}px);
     -webkit-backdrop-filter: blur({{ p.card_blur }}px);
     border: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.55);
+    box-shadow: 0 28px 70px rgba(0, 0, 0, 0.65);
     {% if p.enable_animations %}
     animation: fadeUp 0.6s ease-out;
     {% endif %}
@@ -1827,7 +1869,7 @@ PUBLIC_PROFILE_HTML = """
     to { opacity: 1; transform: translateY(0); }
   }
   .banner {
-    height: 145px;
+    height: 185px;
     width: 100%;
     background: linear-gradient(135deg, {{ p.accent }}, #111827);
     {% if p.banner %}
@@ -1836,16 +1878,16 @@ PUBLIC_PROFILE_HTML = """
     background-position: center;
     {% endif %}
   }
-  .card-inner { padding: 0 1.75rem 1.75rem; text-align: center; }
-  .avatar-wrap { margin-top: -54px; display: flex; justify-content: center; }
+  .card-inner { padding: 0 2.25rem 2.25rem; text-align: center; }
+  .avatar-wrap { margin-top: -64px; display: flex; justify-content: center; }
   .avatar {
-    width: 108px; height: 108px; border-radius: 50%; object-fit: cover;
+    width: 128px; height: 128px; border-radius: 50%; object-fit: cover;
     border: 4px solid {{ p.accent }};
     background: #18181b;
-    box-shadow: 0 8px 25px rgba(0,0,0,0.45);
+    box-shadow: 0 10px 28px rgba(0,0,0,0.55);
   }
   .display-name {
-    font-size: 1.65rem; font-weight: 800; margin-top: 0.75rem;
+    font-size: 1.9rem; font-weight: 800; margin-top: 0.85rem;
     {% if p.enable_animations %}
     background: linear-gradient(90deg, {{ p.text_color }}, {{ p.accent }}, {{ p.text_color }});
     background-size: 200% auto;
@@ -1855,32 +1897,48 @@ PUBLIC_PROFILE_HTML = """
     {% endif %}
   }
   @keyframes shine { to { background-position: 200% center; } }
-  .username { font-size: 0.9rem; opacity: 0.65; margin-top: 2px; }
+  .username { font-size: 0.95rem; opacity: 0.65; margin-top: 2px; }
   .badges {
     display: flex; flex-wrap: wrap; justify-content: center; gap: 8px;
-    margin-top: 0.85rem;
+    margin-top: 1rem;
   }
   .badge {
     display: inline-flex; align-items: center; gap: 6px;
-    padding: 4px 10px; border-radius: 999px; font-size: 0.78rem; font-weight: 600;
+    padding: 5px 12px; border-radius: 999px; font-size: 0.82rem; font-weight: 600;
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.12);
+    pointer-events: none;
+    user-select: none;
+    cursor: default;
+  }
+  .badge:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.12);
+    transform: none;
   }
   .badge i { color: {{ p.accent }}; }
   .bio {
-    margin-top: 0.9rem; font-size: 0.95rem; line-height: 1.5; opacity: 0.9;
+    margin-top: 1rem; font-size: 1rem; line-height: 1.55; opacity: 0.92;
     white-space: pre-line;
   }
   .discord-box {
-    margin-top: 1rem; padding: 0.75rem 1rem; border-radius: 14px;
+    margin-top: 1.15rem; padding: 0.85rem 1.15rem; border-radius: 16px;
     background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.09);
     display: flex; align-items: center; justify-content: space-between; text-align: left;
   }
-  .links { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 1.15rem; }
+  .audio-controls-wrap {
+    margin-top: 1.15rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.7rem;
+    width: 100%;
+  }
+  .links { display: flex; flex-direction: column; gap: 0.7rem; margin-top: 1.25rem; }
   .link-btn {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0.85rem 1.1rem; border-radius: 14px;
+    padding: 0.9rem 1.2rem; border-radius: 14px;
     text-decoration: none; color: {{ p.text_color }}; font-weight: 600;
     background: rgba(255, 255, 255, 0.07);
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -1892,10 +1950,14 @@ PUBLIC_PROFILE_HTML = """
     border-color: {{ p.accent }};
   }
   .footer-meta {
-    margin-top: 1.35rem; display: flex; justify-content: space-between; align-items: center;
-    font-size: 0.8rem; opacity: 0.65;
+    margin-top: 1.5rem; display: flex; justify-content: space-between; align-items: center;
+    font-size: 0.85rem; opacity: 0.7;
   }
   .footer-meta a { color: inherit; text-decoration: none; }
+  @media (max-width: 600px) {
+    .profile-card { max-width: 100%; border-radius: 20px; }
+    .card-inner { padding: 0 1.2rem 1.5rem; }
+  }
 </style>
 </head>
 <body>
@@ -1913,7 +1975,7 @@ PUBLIC_PROFILE_HTML = """
         {% if p.avatar %}
           <img class="avatar" src="/uploads/{{ p.avatar }}" alt="{{ p.display_name }}">
         {% else %}
-          <div class="avatar" style="display:flex;align-items:center;justify-content:center;font-size:2.2rem;font-weight:800;color:{{ p.accent }};">
+          <div class="avatar" style="display:flex;align-items:center;justify-content:center;font-size:2.4rem;font-weight:800;color:{{ p.accent }};">
             {{ user.username[0]|upper }}
           </div>
         {% endif %}
@@ -1937,10 +1999,10 @@ PUBLIC_PROFILE_HTML = """
       {% if p.discord_user %}
       <div class="discord-box">
         <div style="display:flex;align-items:center;gap:10px;">
-          <i class="fa-brands fa-discord" style="font-size:1.5rem;color:#5865F2;"></i>
+          <i class="fa-brands fa-discord" style="font-size:1.55rem;color:#5865F2;"></i>
           <div>
-            <div style="font-weight:700;font-size:0.92rem;">{{ p.discord_user }}</div>
-            <div style="font-size:0.8rem;opacity:0.75;">{{ p.discord_status or 'Online' }}</div>
+            <div style="font-weight:700;font-size:0.95rem;">{{ p.discord_user }}</div>
+            <div style="font-size:0.82rem;opacity:0.75;">{{ p.discord_status or 'Online' }}</div>
           </div>
         </div>
         <span style="width:10px;height:10px;border-radius:50%;background:#10b981;display:inline-block;"></span>
@@ -2019,7 +2081,7 @@ def public_profile(username):
         'crimson': 'radial-gradient(circle at top, #450a0a, #09090b 70%)',
         'emerald': 'radial-gradient(circle at top, #064e3b, #09090b 70%)',
     }
-    bg_style = f"url('/uploads/{p.background}')" if p.background else themes.get(p.theme, themes['default'])
+    bg_style = f"url('{url_for('uploaded_file', filename=p.background)}')" if p.background else themes.get(p.theme, themes['default'])
 
     audio_player_html = render_audio_players(p)
     visible_links = [l for l in user.links if l.visible]
