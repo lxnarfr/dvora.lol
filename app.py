@@ -1,7 +1,7 @@
 import os
 import secrets
 import tempfile
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from flask import Flask, render_template_string, request, redirect, url_for, flash, send_from_directory, abort, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -2072,8 +2072,26 @@ def public_profile(username):
         p = Profile(user_id=user.id, display_name=user.username, page_title=f'{user.username} | Dvora.lol')
         db.session.add(p)
         db.session.commit()
-    p.views += 1
-    db.session.commit()
+
+    viewed_profiles = session.get('viewed_profiles')
+    if not isinstance(viewed_profiles, dict):
+        viewed_profiles = {}
+
+    now_ts = datetime.utcnow().timestamp()
+    view_cooldown_seconds = 15 * 60
+    user_key = str(user.id)
+    last_view_ts = viewed_profiles.get(user_key, 0)
+    try:
+        last_view_ts = float(last_view_ts)
+    except (TypeError, ValueError):
+        last_view_ts = 0.0
+
+    if (now_ts - last_view_ts) >= view_cooldown_seconds:
+        p.views = (p.views or 0) + 1
+        viewed_profiles[user_key] = now_ts
+        session['viewed_profiles'] = viewed_profiles
+        session.modified = True
+        db.session.commit()
 
     themes = {
         'default': 'radial-gradient(circle at top, #1e1b4b, #09090b 70%)',
