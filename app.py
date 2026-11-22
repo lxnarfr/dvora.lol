@@ -1,7 +1,7 @@
 import os
 import secrets
 import tempfile
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from flask import Flask, render_template_string, request, redirect, url_for, flash, send_from_directory, abort, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -1854,7 +1854,7 @@ PUBLIC_PROFILE_HTML = """
     width: 100%;
     max-width: 680px;
     border-radius: 26px;
-    overflow: hidden;
+    overflow: visible;
     background: rgba(18, 18, 22, {{ p.card_opacity }});
     backdrop-filter: blur({{ p.card_blur }}px);
     -webkit-backdrop-filter: blur({{ p.card_blur }}px);
@@ -1863,6 +1863,25 @@ PUBLIC_PROFILE_HTML = """
     {% if p.enable_animations %}
     animation: fadeUp 0.6s ease-out;
     {% endif %}
+  }
+  .banner {
+    height: 185px;
+    width: 100%;
+    border-radius: 26px 26px 0 0;
+    background: linear-gradient(135deg, {{ p.accent }}, #111827);
+    {% if p.banner %}
+    background-image: url('/uploads/{{ p.banner }}');
+    background-size: cover;
+    background-position: center;
+    {% endif %}
+  }
+  .card-inner { padding: 0 2.25rem 2.25rem; text-align: center; }
+  .avatar-wrap { margin-top: -64px; display: flex; justify-content: center; position: relative; z-index: 2; }
+  .avatar {
+    width: 128px; height: 128px; border-radius: 50%; object-fit: cover; object-position: center;
+    border: 4px solid {{ p.accent }};
+    background: #18181b;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.55);
   }
   @keyframes fadeUp {
     from { opacity: 0; transform: translateY(18px); }
@@ -2072,26 +2091,8 @@ def public_profile(username):
         p = Profile(user_id=user.id, display_name=user.username, page_title=f'{user.username} | Dvora.lol')
         db.session.add(p)
         db.session.commit()
-
-    viewed_profiles = session.get('viewed_profiles')
-    if not isinstance(viewed_profiles, dict):
-        viewed_profiles = {}
-
-    now_ts = datetime.utcnow().timestamp()
-    view_cooldown_seconds = 15 * 60
-    user_key = str(user.id)
-    last_view_ts = viewed_profiles.get(user_key, 0)
-    try:
-        last_view_ts = float(last_view_ts)
-    except (TypeError, ValueError):
-        last_view_ts = 0.0
-
-    if (now_ts - last_view_ts) >= view_cooldown_seconds:
-        p.views = (p.views or 0) + 1
-        viewed_profiles[user_key] = now_ts
-        session['viewed_profiles'] = viewed_profiles
-        session.modified = True
-        db.session.commit()
+    p.views += 1
+    db.session.commit()
 
     themes = {
         'default': 'radial-gradient(circle at top, #1e1b4b, #09090b 70%)',
