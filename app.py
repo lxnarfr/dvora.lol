@@ -302,22 +302,26 @@ def run_auto_migrations():
         'site_name': 'Dvora.lol',
         'maintenance_mode': '0',
         'registrations_open': '1',
-        'signup_bonus_credits': '100',
-        'daily_claim_credits': '50',
-        'social_discord': 'https://discord.gg/dvora',
+        'signup_bonus_credits': '75',
+        'daily_claim_credits': '25',
+        'social_discord': 'link',
         'social_twitter': 'https://x.com/dvoralol',
         'social_youtube': '',
         'social_tiktok': '',
         'social_github': '',
         'social_instagram': '',
         'credits_text': 'Built by the Dvora.lol team • Powered by Python & Flask',
-        'credits_team': 'dvora — Founder & Lead Developer',
+        'credits_team': 'Lucky — Founder\ndvora — Lead Developer + Discord Server Creator',
         'credits_supporters': 'Special thanks to our early supporters, beta testers, and community boosters.',
     }
     changed = False
     for k, v in defaults.items():
-        if not db.session.get(SiteSetting, k):
+        existing = db.session.get(SiteSetting, k)
+        if not existing:
             db.session.add(SiteSetting(key=k, value=v))
+            changed = True
+        elif k == 'credits_team' and existing.value.strip() == 'dvora — Lead Developer':
+            existing.value = v
             changed = True
     if changed:
         db.session.commit()
@@ -332,7 +336,7 @@ def load_user(uid):
     user = db.session.get(User, int(uid))
     if user:
         if user.credits is None:
-            user.credits = 100
+            user.credits = 15
         if not user.profile:
             user.profile = Profile(display_name=user.username, page_title=f'{user.username} | {get_setting("site_name", "Dvora.lol")}')
         db.session.commit()
@@ -360,6 +364,186 @@ def delete_upload(fname):
         path = os.path.join(app.config['UPLOAD_FOLDER'], fname)
         if os.path.exists(path):
             os.remove(path)
+
+
+@app.route('/uploads/<path:filename>')
+def uploaded_file(filename):
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe_name)
+    if not safe_name or not os.path.isfile(file_path):
+        abort(404)
+    return send_from_directory(app.config['UPLOAD_FOLDER'], safe_name)
+
+
+def render_audio_players(profile):
+    src = ''
+    if profile.audio_file:
+        src = url_for('uploaded_file', filename=profile.audio_file)
+    elif profile.music_url and profile.music_url.strip():
+        src = profile.music_url.strip()
+
+    if not src:
+        return ''
+
+    title = escape(profile.audio_title.strip() if profile.audio_title else (profile.display_name or 'Now Playing'))
+    art_html = (
+        f'<img src="{escape(url_for("uploaded_file", filename=profile.avatar))}" alt="Cover" class="media-art">'
+        if profile.avatar
+        else '<div class="media-art"><i class="fa-solid fa-music"></i></div>'
+    )
+    safe_src = escape(src)
+
+    return f"""
+    <div class="audio-controls-wrap" id="dvora-audio-player">
+        <audio id="profileAudio" src="{safe_src}" loop preload="metadata"></audio>
+
+        <!-- Compact Volume Pill -->
+        <div class="vol-pill" title="Volume">
+            <button type="button" class="vol-pill-btn" id="dvora-mute-btn" aria-label="Toggle Mute">
+                <i class="fa-solid fa-volume-high" id="dvora-vol-icon"></i>
+            </button>
+            <input type="range" class="vol-slider" id="dvora-vol-slider" min="0" max="100" value="80" style="--vol:80%;" aria-label="Volume">
+        </div>
+
+        <!-- Media Bar -->
+        <div class="media-bar">
+            {art_html}
+            <div class="media-info">
+                <div class="media-title">{title}</div>
+                <div class="media-scrubber">
+                    <span id="dvora-cur-time">0:00</span>
+                    <input type="range" class="media-seek" id="dvora-seek" min="0" max="100" value="0" step="0.1" style="--seek:0%;" aria-label="Seek">
+                    <span id="dvora-dur-time">0:00</span>
+                </div>
+            </div>
+            <div class="media-transport">
+                <button type="button" class="media-ctrl-btn" id="dvora-prev-btn" title="Restart">
+                    <i class="fa-solid fa-backward-step"></i>
+                </button>
+                <button type="button" class="media-ctrl-btn play-pause" id="dvora-play-btn" title="Play / Pause">
+                    <i class="fa-solid fa-play" id="dvora-play-icon"></i>
+                </button>
+                <button type="button" class="media-ctrl-btn" id="dvora-next-btn" title="Forward 10s">
+                    <i class="fa-solid fa-forward-step"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+    <script>
+    (() => {{
+        const audio = document.getElementById('profileAudio');
+        if (!audio) return;
+
+        const playBtn = document.getElementById('dvora-play-btn');
+        const playIcon = document.getElementById('dvora-play-icon');
+        const prevBtn = document.getElementById('dvora-prev-btn');
+        const nextBtn = document.getElementById('dvora-next-btn');
+        const seek = document.getElementById('dvora-seek');
+        const curEl = document.getElementById('dvora-cur-time');
+        const durEl = document.getElementById('dvora-dur-time');
+        const volSlider = document.getElementById('dvora-vol-slider');
+        const muteBtn = document.getElementById('dvora-mute-btn');
+        const volIcon = document.getElementById('dvora-vol-icon');
+
+        let isSeeking = false;
+        let lastNonZeroVol = 0.8;
+        audio.volume = lastNonZeroVol;
+
+        const fmt = (sec) => {{
+            if (!isFinite(sec) || sec < 0) return '0:00';
+            const m = Math.floor(sec / 60);
+            const s = Math.floor(sec % 60);
+            return `${{m}}:${{s < 10 ? '0' : ''}}${{s}}`;
+        }};
+
+        const syncPlayIcon = () => {{
+            if (audio.paused) {{
+                playIcon.className = 'fa-solid fa-play';
+            }} else {{
+                playIcon.className = 'fa-solid fa-pause';
+            }}
+        }};
+
+        const syncVolUI = () => {{
+            const pct = audio.muted ? 0 : Math.round(audio.volume * 100);
+            volSlider.value = pct;
+            volSlider.style.setProperty('--vol', `${{pct}}%`);
+            if (audio.muted || pct === 0) {{
+                volIcon.className = 'fa-solid fa-volume-xmark';
+            }} else if (pct < 50) {{
+                volIcon.className = 'fa-solid fa-volume-low';
+            }} else {{
+                volIcon.className = 'fa-solid fa-volume-high';
+            }}
+        }};
+
+        playBtn.addEventListener('click', () => {{
+            if (audio.paused) {{
+                audio.play().catch(() => {{}});
+            }} else {{
+                audio.pause();
+            }}
+        }});
+
+        prevBtn.addEventListener('click', () => {{
+            audio.currentTime = 0;
+        }});
+
+        nextBtn.addEventListener('click', () => {{
+            if (isFinite(audio.duration)) {{
+                audio.currentTime = Math.min(audio.duration, audio.currentTime + 10);
+            }}
+        }});
+
+        audio.addEventListener('loadedmetadata', () => {{
+            durEl.textContent = fmt(audio.duration);
+            seek.max = audio.duration || 100;
+        }});
+
+        audio.addEventListener('timeupdate', () => {{
+            if (!isSeeking) {{
+                seek.value = audio.currentTime;
+                const pct = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
+                seek.style.setProperty('--seek', `${{pct}}%`);
+            }}
+            curEl.textContent = fmt(audio.currentTime);
+        }});
+
+        seek.addEventListener('input', () => {{
+            isSeeking = true;
+            const pct = audio.duration ? (seek.value / audio.duration) * 100 : 0;
+            seek.style.setProperty('--seek', `${{pct}}%`);
+            curEl.textContent = fmt(seek.value);
+        }});
+
+        seek.addEventListener('change', () => {{
+            audio.currentTime = parseFloat(seek.value) || 0;
+            isSeeking = false;
+        }});
+
+        volSlider.addEventListener('input', () => {{
+            const v = parseInt(volSlider.value, 10) / 100;
+            audio.muted = v === 0;
+            audio.volume = v;
+            if (v > 0) lastNonZeroVol = v;
+            syncVolUI();
+        }});
+
+        muteBtn.addEventListener('click', () => {{
+            audio.muted = !audio.muted;
+            if (!audio.muted && audio.volume === 0) {{
+                audio.volume = lastNonZeroVol || 0.8;
+            }}
+            syncVolUI();
+        }});
+
+        audio.addEventListener('play', syncPlayIcon);
+        audio.addEventListener('pause', syncPlayIcon);
+        audio.addEventListener('ended', syncPlayIcon);
+        syncVolUI();
+    }})();
+    </script>
+    """
 
 
 @app.before_request
@@ -507,10 +691,20 @@ def public_socials():
 @app.route('/credits')
 def public_credits():
     team_lines = [line.strip() for line in get_setting('credits_team', '').splitlines() if line.strip()]
-    team_html = ''.join(
-        f'<div class="row"><span><i class="fa-solid fa-code" style="color:#8b5cf6;margin-right:8px;"></i>{escape(line)}</span></div>'
-        for line in team_lines
-    ) or '<p style="color:#a1a1aa;">No team entries listed.</p>'
+    if not team_lines:
+        team_lines = [
+            'Lucky — Founder',
+            'dvora — Lead Developer + Discord Server Creator',
+        ]
+    team_html = []
+    for line in team_lines:
+        lower = line.lower()
+        if 'founder' in lower:
+            icon_html = '<i class="fa-solid fa-crown" style="color:#fbbf24;margin-right:8px;" title="Founder"></i>'
+        else:
+            icon_html = '<i class="fa-solid fa-code" style="color:#8b5cf6;margin-right:8px;" title="Developer"></i>'
+        team_html.append(f'<div class="row"><span>{icon_html}{escape(line)}</span></div>')
+    team_rendered = ''.join(team_html)
 
     staff_users = [u for u in User.query.all() if u.is_admin]
     staff_pills = ''.join(
@@ -521,10 +715,10 @@ def public_credits():
     return page(f"""<div class="card" style="max-width:720px;margin:2rem auto;">
         <h2><i class="fa-solid fa-award" style="color:#8b5cf6;"></i> Credits & Contributors</h2>
         <p style="color:#a1a1aa;margin:0.6rem 0 1.4rem 0;">{escape(get_setting('credits_text', ''))}</p>
-        <h3 style="margin-bottom:0.5rem;">Core Team</h3>
-        <div style="margin-bottom:1.5rem;">{team_html}</div>
+        <h3 style="margin-bottom:0.5rem;">Dvora.lol Special Helpers</h3>
+        <div style="margin-bottom:1.5rem;">{team_rendered}</div>
         <h3 style="margin-bottom:0.6rem;">Staff</h3>
-        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1.5rem;">{staff_pills or '<span style="color:#a1a1aa;">Threezey, Lucky, Staryx2cold</span>'}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1.5rem;">{staff_pills or '<span style="color:#a1a1aa;">Threezey, Lucky, Staryx2cold, Noa Wit, Dylan Nye, Ravenholy, Casey_1312, threeskid</span>'}</div>
         <h3 style="margin-bottom:0.5rem;">Community & Supporters</h3>
         <p style="color:#d4d4d8;line-height:1.6;">{escape(get_setting('credits_supporters', ''))}</p>
     </div>""", 'Credits')
@@ -622,11 +816,11 @@ def dash(body, active):
                       ('links', '/links', 'Links', 'fa-link'),
                       ('badges', '/badges', 'Badges', 'fa-medal'),
                       ('credits', '/credits', 'Credits & Shop', 'fa-coins'),
-                      ('appearance', '/appearance', 'Appearance', 'fa-palette'),
+                      ('appearance', '/appearance', 'Appearance', 'fa-paint-brush'),
                       ('analytics', '/analytics', 'Analytics', 'fa-chart-line'),
                       ('settings', '/settings', 'Settings', 'fa-gear'),
                   ])
-    return page(f'<div class="dash"><aside>{nav}<hr style="border-color:rgba(255,255,255,0.05);margin:1rem 0;"><a href="/{current_user.username}" target="_blank"><i class="fa-solid fa-eye"></i> View public</a></aside><section class="dash-body">{body}</section></div>')
+    return page(f'<div class="dash"><aside>{nav}<hr style="border:none;border-top:1px solid rgba(255,255,255,0.05);margin:1rem 0;"><a href="/{current_user.username}" target="_blank"><i class="fa-solid fa-eye"></i> View public</a></aside><section class="dash-body">{body}</section></div>', 'Dashboard')
 
 
 @app.route('/dashboard')
@@ -998,11 +1192,6 @@ def settings():
 <button class="btn" style="margin-top:1rem;"><i class="fa-solid fa-key"></i> Update Password</button></form>""", 'settings')
 
 
-@app.route('/uploads/<path:f>')
-def uploaded(f):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], f)
-
-
 @app.route('/go/<int:link_id>')
 def track_link(link_id):
     link = db.session.get(Link, link_id)
@@ -1354,7 +1543,7 @@ def admin():
                 <label>Daily Claim Reward Credits<input type="number" name="daily_claim_credits" min="0" value="{escape(get_setting('daily_claim_credits', '50'))}"></label>
             </div>
             <label>Credits Tagline<input name="credits_text" value="{escape(get_setting('credits_text', ''))}"></label>
-            <label>Core Team Lines (one per line)<textarea name="credits_team" rows="4">{escape(get_setting('credits_team', ''))}</textarea></label>
+            <label>Dvora.lol Special Helpers (one per line)<textarea name="credits_team" rows="4">{escape(get_setting('credits_team', ''))}</textarea></label>
             <label>Community & Supporters Note<textarea name="credits_supporters" rows="3">{escape(get_setting('credits_supporters', ''))}</textarea></label>
             <button class="btn" style="margin-top:0.8rem;"><i class="fa-solid fa-floppy-disk"></i> Save Credits Settings</button>
         </form>
@@ -1566,6 +1755,7 @@ PUBLIC_PROFILE_HTML = """
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ p.page_title or (p.display_name ~ ' | Dvora.lol') }}</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<link rel="stylesheet" href="/static/style.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
   body {
@@ -1687,21 +1877,6 @@ PUBLIC_PROFILE_HTML = """
     border: 1px solid rgba(255, 255, 255, 0.08);
     display: flex; align-items: center; justify-content: space-between; text-align: left;
   }
-  .audio-player {
-    margin-top: 1rem; padding: 0.9rem 1rem; border-radius: 14px;
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    text-align: left;
-  }
-  .audio-header {
-    display: flex; align-items: center; justify-content: space-between;
-    margin-bottom: 0.55rem; font-size: 0.88rem; font-weight: 600;
-  }
-  .audio-player audio {
-    width: 100%;
-    height: 36px;
-    border-radius: 8px;
-  }
   .links { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 1.15rem; }
   .link-btn {
     display: flex; align-items: center; justify-content: space-between;
@@ -1772,15 +1947,7 @@ PUBLIC_PROFILE_HTML = """
       </div>
       {% endif %}
 
-      {% if audio_src %}
-      <div class="audio-player">
-        <div class="audio-header">
-          <span><i class="fa-solid fa-music" style="color:{{ p.accent }};margin-right:6px;"></i>{{ p.audio_title or 'Profile Audio' }}</span>
-          {% if audio_ext %}<span style="font-size:0.72rem;opacity:0.65;text-transform:uppercase;">{{ audio_ext }}</span>{% endif %}
-        </div>
-        <audio id="profileAudio" controls loop preload="auto" src="{{ audio_src }}"></audio>
-      </div>
-      {% endif %}
+      {{ audio_player_html|safe }}
 
       {% if visible_links %}
       <div class="links">
@@ -1854,14 +2021,7 @@ def public_profile(username):
     }
     bg_style = f"url('/uploads/{p.background}')" if p.background else themes.get(p.theme, themes['default'])
 
-    audio_src = ''
-    audio_ext = ''
-    if p.audio_file:
-        audio_src = f"/uploads/{p.audio_file}"
-        audio_ext = p.audio_file.rsplit('.', 1)[-1].lower()
-    elif p.music_url:
-        audio_src = p.music_url
-
+    audio_player_html = render_audio_players(p)
     visible_links = [l for l in user.links if l.visible]
     visible_badges = [b for b in user.badges if b.visible]
 
@@ -1870,8 +2030,7 @@ def public_profile(username):
         user=user,
         p=p,
         bg_style=bg_style,
-        audio_src=audio_src,
-        audio_ext=audio_ext,
+        audio_player_html=audio_player_html,
         visible_links=visible_links,
         badges=visible_badges,
     )
