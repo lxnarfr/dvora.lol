@@ -523,8 +523,8 @@ def public_credits():
         <p style="color:#a1a1aa;margin:0.6rem 0 1.4rem 0;">{escape(get_setting('credits_text', ''))}</p>
         <h3 style="margin-bottom:0.5rem;">Core Team</h3>
         <div style="margin-bottom:1.5rem;">{team_html}</div>
-        <h3 style="margin-bottom:0.6rem;">Active Staff</h3>
-        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1.5rem;">{staff_pills or '<span style="color:#a1a1aa;">None</span>'}</div>
+        <h3 style="margin-bottom:0.6rem;">Staff</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1.5rem;">{staff_pills or '<span style="color:#a1a1aa;">Threezey, Lucky, Staryx2cold</span>'}</div>
         <h3 style="margin-bottom:0.5rem;">Community & Supporters</h3>
         <p style="color:#d4d4d8;line-height:1.6;">{escape(get_setting('credits_supporters', ''))}</p>
     </div>""", 'Credits')
