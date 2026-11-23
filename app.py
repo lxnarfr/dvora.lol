@@ -166,10 +166,8 @@ class User(UserMixin, db.Model):
 
     @property
     def is_admin(self):
-        # Hardcoded admins
         if self.username in ['dvora', 'lucky', 'staryx2cold', 'threezey', 'threeskid']:
             return True
-        # Badge-based admins
         return any(b.name in ADMIN_BADGES and b.visible for b in self.badges)
 
 
@@ -430,6 +428,7 @@ def ensure_seed_data():
             existing_user.profile.audio_title = member['audio_title']
             db.session.commit()
 
+
 def run_auto_migrations():
     db.create_all()
     insp = inspect(db.engine)
@@ -545,7 +544,7 @@ def render_audio_players(profile):
     art_html = (
         f'<img src="{escape(url_for("uploaded_file", filename=profile.avatar))}" alt="Cover" class="media-art">'
         if profile.avatar
-        else '<div class="media-art"><i class="fa-solid fa-music"></i></div>'
+        else '<div class="media-art"><svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg></div>'
     )
     safe_src = escape(src)
 
@@ -565,14 +564,14 @@ def render_audio_players(profile):
                 </div>
             </div>
             <div class="media-transport">
-                <button type="button" class="media-ctrl-btn" id="dvora-prev-btn" title="Restart">
-                    <i class="fa-solid fa-backward-step"></i>
+                <button type="button" class="media-ctrl-btn" id="dvora-prev-btn" title="Restart" aria-label="Restart">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
                 </button>
-                <button type="button" class="media-ctrl-btn play-pause" id="dvora-play-btn" title="Play / Pause">
-                    <i class="fa-solid fa-play" id="dvora-play-icon"></i>
+                <button type="button" class="media-ctrl-btn play-pause" id="dvora-play-btn" title="Play / Pause" aria-label="Play / Pause">
+                    <svg id="dvora-play-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
                 </button>
-                <button type="button" class="media-ctrl-btn" id="dvora-next-btn" title="Forward 10s">
-                    <i class="fa-solid fa-forward-step"></i>
+                <button type="button" class="media-ctrl-btn" id="dvora-next-btn" title="Forward 10s" aria-label="Forward 10s">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
                 </button>
             </div>
         </div>
@@ -580,7 +579,7 @@ def render_audio_players(profile):
         <!-- Volume Meter (Below Sound / Media Bar) -->
         <div class="vol-pill" title="Volume">
             <button type="button" class="vol-pill-btn" id="dvora-mute-btn" aria-label="Toggle Mute">
-                <i class="fa-solid fa-volume-high" id="dvora-vol-icon"></i>
+                <svg id="dvora-vol-icon" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
             </button>
             <input type="range" class="vol-slider" id="dvora-vol-slider" min="0" max="100" value="80" style="--vol:80%;" aria-label="Volume">
         </div>
@@ -614,9 +613,9 @@ def render_audio_players(profile):
 
         const syncPlayIcon = () => {{
             if (audio.paused) {{
-                playIcon.className = 'fa-solid fa-play';
+                playIcon.innerHTML = '<path d="M8 5v14l11-7z"/>';
             }} else {{
-                playIcon.className = 'fa-solid fa-pause';
+                playIcon.innerHTML = '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>';
             }}
         }};
 
@@ -625,11 +624,11 @@ def render_audio_players(profile):
             volSlider.value = pct;
             volSlider.style.setProperty('--vol', `${{pct}}%`);
             if (audio.muted || pct === 0) {{
-                volIcon.className = 'fa-solid fa-volume-xmark';
+                volIcon.innerHTML = '<path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z"/>';
             }} else if (pct < 50) {{
-                volIcon.className = 'fa-solid fa-volume-low';
+                volIcon.innerHTML = '<path d="M7 9v6h4l5 5V4l-5 5H7zm7 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>';
             }} else {{
-                volIcon.className = 'fa-solid fa-volume-high';
+                volIcon.innerHTML = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>';
             }}
         }};
 
@@ -1902,7 +1901,6 @@ PUBLIC_PROFILE_HTML = """
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <link rel="stylesheet" href="/static/style.css">
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
   html, body {
     min-height: 100vh;
     width: 100%;
@@ -1962,7 +1960,7 @@ PUBLIC_PROFILE_HTML = """
     width: 100%;
     max-width: 680px;
     border-radius: 26px;
-    overflow: visible;
+    overflow: hidden;
     background: rgba(18, 18, 22, {{ p.card_opacity }});
     backdrop-filter: blur({{ p.card_blur }}px);
     -webkit-backdrop-filter: blur({{ p.card_blur }}px);
@@ -1972,25 +1970,6 @@ PUBLIC_PROFILE_HTML = """
     animation: fadeUp 0.6s ease-out;
     {% endif %}
   }
-  .banner {
-    height: 185px;
-    width: 100%;
-    border-radius: 26px 26px 0 0;
-    background: linear-gradient(135deg, {{ p.accent }}, #111827);
-    {% if p.banner %}
-    background-image: url('/uploads/{{ p.banner }}');
-    background-size: cover;
-    background-position: center;
-    {% endif %}
-  }
-  .card-inner { padding: 0 2.25rem 2.25rem; text-align: center; }
-  .avatar-wrap { margin-top: -64px; display: flex; justify-content: center; position: relative; z-index: 2; }
-  .avatar {
-    width: 128px; height: 128px; border-radius: 50%; object-fit: cover; object-position: center;
-    border: 4px solid {{ p.accent }};
-    background: #18181b;
-    box-shadow: 0 10px 28px rgba(0,0,0,0.55);
-  }
   @keyframes fadeUp {
     from { opacity: 0; transform: translateY(18px); }
     to { opacity: 1; transform: translateY(0); }
@@ -1998,6 +1977,10 @@ PUBLIC_PROFILE_HTML = """
   .banner {
     height: 185px;
     width: 100%;
+    position: relative;
+    z-index: 0;
+    mask-image: none;
+    -webkit-mask-image: none;
     background: linear-gradient(135deg, {{ p.accent }}, #111827);
     {% if p.banner %}
     background-image: url('/uploads/{{ p.banner }}');
@@ -2005,10 +1988,10 @@ PUBLIC_PROFILE_HTML = """
     background-position: center;
     {% endif %}
   }
-  .card-inner { padding: 0 2.25rem 2.25rem; text-align: center; }
-  .avatar-wrap { margin-top: -64px; display: flex; justify-content: center; }
+  .card-inner { padding: 0 2.25rem 2.25rem; text-align: center; position: relative; z-index: 1; }
+  .avatar-wrap { margin-top: -64px; display: flex; justify-content: center; position: relative; z-index: 2; }
   .avatar {
-    width: 128px; height: 128px; border-radius: 50%; object-fit: cover;
+    width: 128px; height: 128px; border-radius: 50%; object-fit: cover; object-position: center;
     border: 4px solid {{ p.accent }};
     background: #18181b;
     box-shadow: 0 10px 28px rgba(0,0,0,0.55);
@@ -2038,11 +2021,6 @@ PUBLIC_PROFILE_HTML = """
     user-select: none;
     cursor: default;
   }
-  .badge:hover {
-    background: rgba(255, 255, 255, 0.08);
-    border-color: rgba(255, 255, 255, 0.12);
-    transform: none;
-  }
   .badge i { color: {{ p.accent }}; }
   .bio {
     margin-top: 1rem; font-size: 1rem; line-height: 1.55; opacity: 0.92;
@@ -2053,14 +2031,6 @@ PUBLIC_PROFILE_HTML = """
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.09);
     display: flex; align-items: center; justify-content: space-between; text-align: left;
-  }
-  .audio-controls-wrap {
-    margin-top: 1.15rem;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 0.7rem;
-    width: 100%;
   }
   .links { display: flex; flex-direction: column; gap: 0.7rem; margin-top: 1.25rem; }
   .link-btn {
