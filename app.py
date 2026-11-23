@@ -295,7 +295,8 @@ def adjust_credits(user, delta, reason):
 
 def ensure_seed_data():
     # 1. Set up the main dvora account
-    if not User.query.filter_by(username='dvora').first():
+    admin_user = User.query.filter_by(username='dvora').first()
+    if not admin_user:
         seed_pw = os.environ.get('DVORA_ADMIN_PASSWORD') or 'Roma141786..1'
         admin_user = User(
             username='dvora',
@@ -315,9 +316,9 @@ def ensure_seed_data():
             enable_animations=True,
             theme='default',
             page_title='dvora | Developer',
-            banner='https://cdn.discordapp.com/attachments/1573932012803203086/1574236952184492042/OIP.webp?ex=6b04e9e9&is=6b039869&hm=96a804d302469c0893d259b976e4911c313c8160ec6b9a9917db1b14da5d121a&',
-            avatar='https://cdn.discordapp.com/attachments/1573932012803203086/1574236855808032768/ChatGPT_Image_Nov_22_2026_08_15_20_AM.png?ex=6b04e9d2&is=6b039852&hm=cdf3384f4a7652b8d08f0bc0e34b18c539ffb774ba185bfcb66cb9cdc8c23425&',
-            music_url='https://files.catbox.moe/cwjfso.mp3',
+            banner='/static/banners/dvora_banner.webp',
+            avatar='/static/avatars/dvora.png',
+            music_url='/static/audio/earl.mp3',
             audio_title='My Cousin Earl By WTFPRESTON',
         )
         db.session.add(admin_user)
@@ -328,6 +329,12 @@ def ensure_seed_data():
         for bname in starter_badges:
             db.session.add(Badge(user_id=admin_user.id, name=bname, icon=icon_map.get(bname, 'fa-star'), visible=True))
         db.session.commit()
+    elif admin_user.profile:
+        admin_user.profile.banner = '/static/banners/dvora_banner.webp'
+        admin_user.profile.avatar = '/static/avatars/dvora.png'
+        admin_user.profile.music_url = '/static/audio/earl.mp3'
+        admin_user.profile.audio_title = 'My Cousin Earl By WTFPRESTON'
+        db.session.commit()
 
     # 2. Set up the other staff/admin accounts
     team_members = [
@@ -336,10 +343,10 @@ def ensure_seed_data():
             'email': 'lucky@dvora.lol',
             'display_name': 'Lucky',
             'bio': 'Founder of Dvora.lol. Building the best link-in-bio platform.',
-            'avatar': 'https://i.imgur.com/7eQ1x2Y.jpeg',
-            'banner': 'https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=1000&auto=format&fit=crop',
-            'music_url': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
-            'audio_title': 'Lucky Vibes',
+            'avatar': '/static/avatars/lucky.png',
+            'banner': '/static/banners/lucky_banner.png',
+            'music_url': '/static/audio/earl.mp3',
+            'audio_title': 'My Cousin Earl By WTFPRESTON',
             'badges': ['Owner', 'Beta Tester', 'Staff', 'Early Supporter']
         },
         {
@@ -347,9 +354,9 @@ def ensure_seed_data():
             'email': 'staryx@dvora.lol',
             'display_name': 'Staryx',
             'bio': "If a bih don't like you don't hang on to her if you haven't talked to her-me randomly at 12:17am",
-            'avatar': 'https://i.imgur.com/8QO4w7q.jpeg',
-            'banner': 'https://images.unsplash.com/photo-1519681393784-d120267933ba?q=80&w=1000&auto=format&fit=crop',
-            'music_url': 'https://files.catbox.moe/2amhnq.mp3', 
+            'avatar': '/static/avatars/staryx.jpg',
+            'banner': '/static/banners/staryx_banner.jpg',
+            'music_url': '/static/audio/netherlands.mp3',
             'audio_title': 'Netherlands by dotewav',
             'badges': ['Staff', 'Beta Tester']
         },
@@ -358,10 +365,10 @@ def ensure_seed_data():
             'email': 'threezey@dvora.lol',
             'display_name': '🎅jolly threeyez⛄',
             'bio': 'hi.\nex mod maker in Vr Cheats (13K)\nguns.lol: https://guns.lol/gryze\nPrimal Horror! server: https://discord.gg/wTPQQBA6Pb.',
-            'avatar': 'https://i.imgur.com/9P5Wz3G.jpeg',
+            'avatar': '/static/avatars/bird_man.jpg',
             'banner': 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1000&auto=format&fit=crop',
-            'music_url': '',
-            'audio_title': '',
+            'music_url': '/static/audio/threeskid_threezey.mp3',
+            'audio_title': 'Threeskid & Threezey Track',
             'badges': ['Staff', 'Beta Tester']
         },
         {
@@ -369,10 +376,10 @@ def ensure_seed_data():
             'email': 'threeskid@dvora.lol',
             'display_name': 'Threeskid',
             'bio': 'hi.\nex mod maker in Vr Cheats (13K)\nguns.lol: https://guns.lol/gryze\nPrimal Horror! server: https://discord.gg/wTPQQBA6Pb.',
-            'avatar': 'https://i.imgur.com/0QZ2x8L.jpeg',
+            'avatar': '/static/avatars/bird_man.jpg',
             'banner': 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1000&auto=format&fit=crop',
-            'music_url': '',
-            'audio_title': '',
+            'music_url': '/static/audio/threeskid_threezey.mp3',
+            'audio_title': 'Threeskid & Threezey Track',
             'badges': ['Staff', 'Beta Tester']
         }
     ]
@@ -380,7 +387,8 @@ def ensure_seed_data():
     icon_map = {b['name']: b['icon'] for b in BADGES_LIST}
 
     for member in team_members:
-        if not User.query.filter_by(username=member['username']).first():
+        existing_user = User.query.filter_by(username=member['username']).first()
+        if not existing_user:
             new_user = User(
                 username=member['username'],
                 email=member['email'],
@@ -410,7 +418,13 @@ def ensure_seed_data():
             
             db.session.commit()
             print(f"Seeded account for @{member['username']}")
-
+        elif existing_user.profile:
+            existing_user.profile.avatar = member['avatar']
+            existing_user.profile.banner = member['banner']
+            if member['music_url']:
+                existing_user.profile.music_url = member['music_url']
+                existing_user.profile.audio_title = member['audio_title']
+            db.session.commit()
 
 def run_auto_migrations():
     db.create_all()
