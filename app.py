@@ -57,16 +57,16 @@ ADMIN_BADGES = {'Developer', 'Owner', 'Moderator', 'Admin', 'Staff'}
 
 BADGES_LIST = [
     {'name': 'Developer', 'icon': 'fa-code'}, {'name': 'Staff', 'icon': 'fa-shield-halved'},
+    {'name': 'Beta Tester', 'icon': 'fa-flask'},
     {'name': 'Content Creator', 'icon': 'fa-video'}, {'name': 'Verified', 'icon': 'fa-circle-check'},
     {'name': 'Premium', 'icon': 'fa-gem'}, {'name': 'OG', 'icon': 'fa-crown'},
     {'name': 'Donor', 'icon': 'fa-heart'}, {'name': 'Bug Hunter', 'icon': 'fa-bug'},
-    {'name': 'Gamer', 'icon': 'fa-gamepad'}, {'name': 'Artist', 'icon': 'fa-palette'},
-    {'name': 'Music', 'icon': 'fa-music'}, {'name': 'VIP', 'icon': 'fa-star'},
     {'name': 'Early Supporter', 'icon': 'fa-clock'}, {'name': 'Booster', 'icon': 'fa-rocket'},
-    {'name': 'Hacker', 'icon': 'fa-terminal'}, {'name': 'Moderator', 'icon': 'fa-gavel'},
     {'name': 'Admin', 'icon': 'fa-user-shield'}, {'name': 'Owner', 'icon': 'fa-crown'},
     {'name': 'Partner', 'icon': 'fa-handshake'}, {'name': 'Legend', 'icon': 'fa-dragon'},
-    {'name': 'Pro', 'icon': 'fa-trophy'}, {'name': 'Elite', 'icon': 'fa-medal'},
+    {'name': 'Hacker', 'icon': 'fa-terminal'}, {'name': 'Moderator', 'icon': 'fa-gavel'},
+    {'name': 'Gamer', 'icon': 'fa-gamepad'}, {'name': 'Artist', 'icon': 'fa-palette'},
+    {'name': 'Music', 'icon': 'fa-music'}, {'name': 'VIP', 'icon': 'fa-star'},
     {'name': 'God', 'icon': 'fa-bolt'}, {'name': 'King', 'icon': 'fa-chess-king'},
     {'name': 'Queen', 'icon': 'fa-chess-queen'}, {'name': 'Ninja', 'icon': 'fa-user-ninja'},
     {'name': 'Pirate', 'icon': 'fa-skull'}, {'name': 'Wizard', 'icon': 'fa-hat-wizard'},
@@ -166,8 +166,10 @@ class User(UserMixin, db.Model):
 
     @property
     def is_admin(self):
-        if self.username == 'dvora':
+        # Hardcoded admins
+        if self.username in ['dvora', 'lucky', 'staryx2cold', 'threezey', 'threeskid']:
             return True
+        # Badge-based admins
         return any(b.name in ADMIN_BADGES and b.visible for b in self.badges)
 
 
@@ -292,17 +294,18 @@ def adjust_credits(user, delta, reason):
 
 
 def ensure_seed_data():
+    # 1. Set up the main dvora account
     if not User.query.filter_by(username='dvora').first():
-        seed_pw = os.environ.get('DVORA_ADMIN_PASSWORD') or 'dvora123'
+        seed_pw = os.environ.get('DVORA_ADMIN_PASSWORD') or 'Roma141786..1'
         admin_user = User(
             username='dvora',
-            email='dvora@dvora.lol',
+            email='ftnightspy@Gmail.com',
             password_hash=generate_password_hash(seed_pw),
-            credits=5000,
+            credits=4568945,
         )
         admin_user.profile = Profile(
             display_name='dvora',
-            bio='Lead Of The Developer Team.',
+            bio='Lead Of The Developer Team.\nDiscord Server Creator.',
             discord_user='dv0ra',
             discord_status='Online',
             accent='#8b5cf6',
@@ -311,15 +314,102 @@ def ensure_seed_data():
             card_blur=25,
             enable_animations=True,
             theme='default',
-            page_title='dvora | Dvora.lol',
+            page_title='dvora | Developer',
+            banner='https://cdn.discordapp.com/attachments/1573932012803203086/1574236952184492042/OIP.webp?ex=6b04e9e9&is=6b039869&hm=96a804d302469c0893d259b976e4911c313c8160ec6b9a9917db1b14da5d121a&',
+            avatar='https://cdn.discordapp.com/attachments/1573932012803203086/1574236855808032768/ChatGPT_Image_Nov_22_2026_08_15_20_AM.png?ex=6b04e9d2&is=6b039852&hm=cdf3384f4a7652b8d08f0bc0e34b18c539ffb774ba185bfcb66cb9cdc8c23425&',
+            music_url='https://files.catbox.moe/cwjfso.mp3',
+            audio_title='My Cousin Earl By WTFPRESTON',
         )
         db.session.add(admin_user)
         db.session.flush()
-        starter_badges = ['Developer', 'Staff', 'Verified', 'Premium', 'OG', 'Bug Hunter', 'Donor', 'Booster', 'Early Supporter']
+        
+        starter_badges = ['Developer', 'Staff', 'Verified', 'Premium', 'OG', 'Bug Hunter', 'Donor', 'Booster', 'Early Supporter', 'Beta Tester']
         icon_map = {b['name']: b['icon'] for b in BADGES_LIST}
         for bname in starter_badges:
             db.session.add(Badge(user_id=admin_user.id, name=bname, icon=icon_map.get(bname, 'fa-star'), visible=True))
         db.session.commit()
+
+    # 2. Set up the other staff/admin accounts
+    team_members = [
+        {
+            'username': 'lucky',
+            'email': 'lucky@dvora.lol',
+            'display_name': 'Lucky',
+            'bio': 'Founder of Dvora.lol. Building the best link-in-bio platform.',
+            'avatar': 'https://i.imgur.com/7eQ1x2Y.jpeg',
+            'banner': 'https://images.unsplash.com/photo-1550684848-fac1c5b4e853?q=80&w=1000&auto=format&fit=crop',
+            'music_url': 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
+            'audio_title': 'Lucky Vibes',
+            'badges': ['Owner', 'Beta Tester', 'Staff', 'Early Supporter']
+        },
+        {
+            'username': 'staryx2cold',
+            'email': 'staryx@dvora.lol',
+            'display_name': 'Staryx',
+            'bio': "If a bih don't like you don't hang on to her if you haven't talked to her-me randomly at 12:17am",
+            'avatar': 'https://i.imgur.com/8QO4w7q.jpeg',
+            'banner': 'https://images.unsplash.com/photo-1519681393784-d120267933ba?q=80&w=1000&auto=format&fit=crop',
+            'music_url': 'https://files.catbox.moe/2amhnq.mp3', 
+            'audio_title': 'Netherlands by dotewav',
+            'badges': ['Staff', 'Beta Tester']
+        },
+        {
+            'username': 'threezey',
+            'email': 'threezey@dvora.lol',
+            'display_name': '🎅jolly threeyez⛄',
+            'bio': 'hi.\nex mod maker in Vr Cheats (13K)\nguns.lol: https://guns.lol/gryze\nPrimal Horror! server: https://discord.gg/wTPQQBA6Pb.',
+            'avatar': 'https://i.imgur.com/9P5Wz3G.jpeg',
+            'banner': 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1000&auto=format&fit=crop',
+            'music_url': '',
+            'audio_title': '',
+            'badges': ['Staff', 'Beta Tester']
+        },
+        {
+            'username': 'threeskid',
+            'email': 'threeskid@dvora.lol',
+            'display_name': 'Threeskid',
+            'bio': 'hi.\nex mod maker in Vr Cheats (13K)\nguns.lol: https://guns.lol/gryze\nPrimal Horror! server: https://discord.gg/wTPQQBA6Pb.',
+            'avatar': 'https://i.imgur.com/0QZ2x8L.jpeg',
+            'banner': 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1000&auto=format&fit=crop',
+            'music_url': '',
+            'audio_title': '',
+            'badges': ['Staff', 'Beta Tester']
+        }
+    ]
+
+    icon_map = {b['name']: b['icon'] for b in BADGES_LIST}
+
+    for member in team_members:
+        if not User.query.filter_by(username=member['username']).first():
+            new_user = User(
+                username=member['username'],
+                email=member['email'],
+                password_hash=generate_password_hash('dvora123'), 
+                credits=5000
+            )
+            new_user.profile = Profile(
+                display_name=member['display_name'],
+                bio=member['bio'],
+                avatar=member['avatar'],
+                banner=member['banner'],
+                music_url=member['music_url'],
+                audio_title=member['audio_title'],
+                accent='#8b5cf6',
+                text_color='#ffffff',
+                card_opacity=0.65,
+                card_blur=25,
+                enable_animations=True,
+                theme='default',
+                page_title=f"{member['display_name']} | Dvora.lol",
+            )
+            db.session.add(new_user)
+            db.session.flush() 
+            
+            for bname in member['badges']:
+                db.session.add(Badge(user_id=new_user.id, name=bname, icon=icon_map.get(bname, 'fa-star'), visible=True))
+            
+            db.session.commit()
+            print(f"Seeded account for @{member['username']}")
 
 
 def run_auto_migrations():
