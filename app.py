@@ -294,7 +294,6 @@ def adjust_credits(user, delta, reason):
 
 
 def ensure_seed_data():
-    # 1. Set up the main dvora account
     admin_user = User.query.filter_by(username='dvora').first()
     if not admin_user:
         seed_pw = os.environ.get('DVORA_ADMIN_PASSWORD') or 'Roma141786..1'
@@ -316,36 +315,38 @@ def ensure_seed_data():
             enable_animations=True,
             theme='default',
             page_title='dvora | Developer',
-            banner='/static/banners/dvora_banner.webp',
-            avatar='/static/avatars/dvora.png',
-            music_url='/static/audio/earl.mp3',
+            avatar='seed_dvora_avatar.png',
+            banner='seed_dvora_banner.webp',
+            audio_file='seed_earl.mp3',
+            music_url='/uploads/seed_earl.mp3',
             audio_title='My Cousin Earl By WTFPRESTON',
         )
         db.session.add(admin_user)
         db.session.flush()
-        
+
         starter_badges = ['Developer', 'Staff', 'Verified', 'Premium', 'OG', 'Bug Hunter', 'Donor', 'Booster', 'Early Supporter', 'Beta Tester']
         icon_map = {b['name']: b['icon'] for b in BADGES_LIST}
         for bname in starter_badges:
             db.session.add(Badge(user_id=admin_user.id, name=bname, icon=icon_map.get(bname, 'fa-star'), visible=True))
         db.session.commit()
     elif admin_user.profile:
-        admin_user.profile.banner = '/static/banners/dvora_banner.webp'
-        admin_user.profile.avatar = '/static/avatars/dvora.png'
-        admin_user.profile.music_url = '/static/audio/earl.mp3'
+        admin_user.profile.avatar = 'seed_dvora_avatar.png'
+        admin_user.profile.banner = 'seed_dvora_banner.webp'
+        admin_user.profile.audio_file = 'seed_earl.mp3'
+        admin_user.profile.music_url = '/uploads/seed_earl.mp3'
         admin_user.profile.audio_title = 'My Cousin Earl By WTFPRESTON'
         db.session.commit()
 
-    # 2. Set up the other staff/admin accounts
     team_members = [
         {
             'username': 'lucky',
             'email': 'lucky@dvora.lol',
             'display_name': 'Lucky',
             'bio': 'Founder of Dvora.lol. Building the best link-in-bio platform.',
-            'avatar': '/static/avatars/lucky.png',
-            'banner': '/static/banners/lucky_banner.png',
-            'music_url': '/static/audio/earl.mp3',
+            'avatar': 'seed_lucky_avatar.png',
+            'banner': 'seed_lucky_banner.png',
+            'audio_file': 'seed_earl.mp3',
+            'music_url': '/uploads/seed_earl.mp3',
             'audio_title': 'My Cousin Earl By WTFPRESTON',
             'badges': ['Owner', 'Beta Tester', 'Staff', 'Early Supporter']
         },
@@ -354,9 +355,10 @@ def ensure_seed_data():
             'email': 'staryx@dvora.lol',
             'display_name': 'Staryx',
             'bio': "If a bih don't like you don't hang on to her if you haven't talked to her-me randomly at 12:17am",
-            'avatar': '/static/avatars/staryx.jpg',
-            'banner': '/static/banners/staryx_banner.jpg',
-            'music_url': '/static/audio/netherlands.mp3',
+            'avatar': 'seed_staryx_avatar.jpg',
+            'banner': 'seed_staryx_banner.jpg',
+            'audio_file': 'seed_netherlands.mp3',
+            'music_url': '/uploads/seed_netherlands.mp3',
             'audio_title': 'Netherlands by dotewav',
             'badges': ['Staff', 'Beta Tester']
         },
@@ -365,10 +367,11 @@ def ensure_seed_data():
             'email': 'threezey@dvora.lol',
             'display_name': '🎅jolly threeyez⛄',
             'bio': 'hi.\nex mod maker in Vr Cheats (13K)\nguns.lol: https://guns.lol/gryze\nPrimal Horror! server: https://discord.gg/wTPQQBA6Pb.',
-            'avatar': '/static/avatars/bird_man.jpg',
-            'banner': 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1000&auto=format&fit=crop',
-            'music_url': '/static/audio/threeskid_threezey.mp3',
-            'audio_title': 'Threeskid & Threezey Track',
+            'avatar': 'seed_bird_avatar.jpg',
+            'banner': '',
+            'audio_file': 'seed_threeskid_threezey.mp3',
+            'music_url': '/uploads/seed_threeskid_threezey.mp3',
+            'audio_title': 'She Shited on My Dick - Cmoney2423',
             'badges': ['Staff', 'Beta Tester']
         },
         {
@@ -376,10 +379,11 @@ def ensure_seed_data():
             'email': 'threeskid@dvora.lol',
             'display_name': 'Threeskid',
             'bio': 'hi.\nex mod maker in Vr Cheats (13K)\nguns.lol: https://guns.lol/gryze\nPrimal Horror! server: https://discord.gg/wTPQQBA6Pb.',
-            'avatar': '/static/avatars/bird_man.jpg',
-            'banner': 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?q=80&w=1000&auto=format&fit=crop',
-            'music_url': '/static/audio/threeskid_threezey.mp3',
-            'audio_title': 'Threeskid & Threezey Track',
+            'avatar': 'seed_bird_avatar.jpg',
+            'banner': '',
+            'audio_file': 'seed_threeskid_threezey.mp3',
+            'music_url': '/uploads/seed_threeskid_threezey.mp3',
+            'audio_title': 'She Shited on My Dick - Cmoney2423',
             'badges': ['Staff', 'Beta Tester']
         }
     ]
@@ -392,7 +396,7 @@ def ensure_seed_data():
             new_user = User(
                 username=member['username'],
                 email=member['email'],
-                password_hash=generate_password_hash('dvora123'), 
+                password_hash=generate_password_hash('dvora123'),
                 credits=5000
             )
             new_user.profile = Profile(
@@ -400,6 +404,7 @@ def ensure_seed_data():
                 bio=member['bio'],
                 avatar=member['avatar'],
                 banner=member['banner'],
+                audio_file=member['audio_file'],
                 music_url=member['music_url'],
                 audio_title=member['audio_title'],
                 accent='#8b5cf6',
@@ -411,19 +416,18 @@ def ensure_seed_data():
                 page_title=f"{member['display_name']} | Dvora.lol",
             )
             db.session.add(new_user)
-            db.session.flush() 
-            
+            db.session.flush()
+
             for bname in member['badges']:
                 db.session.add(Badge(user_id=new_user.id, name=bname, icon=icon_map.get(bname, 'fa-star'), visible=True))
-            
+
             db.session.commit()
-            print(f"Seeded account for @{member['username']}")
         elif existing_user.profile:
             existing_user.profile.avatar = member['avatar']
             existing_user.profile.banner = member['banner']
-            if member['music_url']:
-                existing_user.profile.music_url = member['music_url']
-                existing_user.profile.audio_title = member['audio_title']
+            existing_user.profile.audio_file = member['audio_file']
+            existing_user.profile.music_url = member['music_url']
+            existing_user.profile.audio_title = member['audio_title']
             db.session.commit()
 
 def run_auto_migrations():
